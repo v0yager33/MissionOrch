@@ -1,6 +1,6 @@
-# MissionOrch - 多智能体任务编排系统
+# MissionOrch - 多智能体任务规划系统
 
-MissionOrch 是一个多智能体任务编排系统，专门用于生成战役级行动方案（COA - Course of Action）。系统采用规划-评估-反思-验证的迭代循环来不断改进生成的行动方案。
+MissionOrch 是一个多智能体战场任务规划系统，专门用于生成战役级行动方案（COA - Course of Action）。系统采用规划-评估-反思-验证的迭代循环来不断改进生成的行动方案。
 
 ## 系统架构
 
