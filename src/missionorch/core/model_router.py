@@ -8,6 +8,7 @@ import yaml
 import openai
 import google.generativeai as genai
 from anthropic import AsyncAnthropic
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 logger = logging.getLogger(__name__)
@@ -241,7 +242,6 @@ class OpenAIAdapter(BaseAdapter):
         if not api_key:
             raise ValueError("OpenAI 适配器需要 'api_key' 配置")
             
-        # 使用配置中的超时值，默认为120秒以处理较慢的API
         timeout_val = config.get('timeout', 120)
         self.client = openai.AsyncOpenAI(
             api_key=api_key,
@@ -251,44 +251,31 @@ class OpenAIAdapter(BaseAdapter):
         self.timeout = timeout_val
         logger.info(f"OpenAI 适配器已初始化，模型: {self.model}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((openai.APITimeoutError, openai.APIConnectionError, openai.RateLimitError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"OpenAI 请求失败，第 {retry_state.attempt_number} 次重试: {retry_state.outcome.exception()}"
+        ),
+    )
     async def chat(self, messages: List[Dict[str, str]], temperature: Optional[float] = None, **kwargs) -> str:
-        """
-        执行 OpenAI 聊天请求
+        logger.debug(f"向 OpenAI 模型 {self.model} 发送请求，消息数量: {len(messages)}")
         
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            **kwargs: 其他传递给 API 的参数
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self.default_temp,
+            max_tokens=self.max_tokens,
+            **kwargs
+        )
+        
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError("API 返回空内容")
             
-        Returns:
-            生成的文本响应
-            
-        Raises:
-            Exception: 当 API 请求失败时
-        """
-        try:
-            logger.debug(f"向 OpenAI 模型 {self.model} 发送请求，消息数量: {len(messages)}")
-            
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature if temperature is not None else self.default_temp,
-                max_tokens=self.max_tokens,
-                **kwargs
-            )
-            
-            content = response.choices[0].message.content
-            if content is None:
-                raise Exception("API 返回空内容")
-                
-            logger.debug(f"OpenAI 模型 {self.model} 响应成功，内容长度: {len(content)}")
-            return content
-        except openai.APIError as e:
-            logger.error(f"OpenAI API 错误 (模型 {self.model}): {e}")
-            raise
-        except Exception as e:
-            logger.error(f"OpenAI 请求失败 (模型 {self.model}): {e}")
-            raise
+        logger.debug(f"OpenAI 模型 {self.model} 响应成功，内容长度: {len(content)}")
+        return content
 
 
 class GeminiAdapter(BaseAdapter):
@@ -307,101 +294,78 @@ class GeminiAdapter(BaseAdapter):
             "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
         })
         
-        # 初始化基础模型，系统指令将在聊天时处理
         self.gen_model = genai.GenerativeModel(
             model_name=config['model'],
             safety_settings=safety_settings
         )
         logger.info(f"Gemini 适配器已初始化，模型: {self.model}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"Gemini 请求失败，第 {retry_state.attempt_number} 次重试: {retry_state.outcome.exception()}"
+        ),
+    )
     async def chat(self, messages: List[Dict[str, str]], temperature: Optional[float] = None, **kwargs) -> str:
-        """
-        执行 Gemini 聊天请求
+        logger.debug(f"向 Gemini 模型 {self.model} 发送请求，消息数量: {len(messages)}")
         
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            **kwargs: 其他传递给 API 的参数
+        system_instruction = None
+        chat_history = []
+        
+        for msg in messages:
+            role = msg['role']
+            content = msg['content']
             
-        Returns:
-            生成的文本响应
+            if role == 'system':
+                if system_instruction is None:
+                    system_instruction = content
+            elif role in ['user', 'assistant']:
+                gemini_role = 'user' if role == 'user' else 'model'
+                chat_history.append({
+                    'role': gemini_role,
+                    'parts': [content]
+                })
+        
+        if system_instruction:
+            model_with_system = genai.GenerativeModel(
+                model_name=self.config['model'],
+                safety_settings=self.gen_model.safety_settings,
+                system_instruction=system_instruction
+            )
+        else:
+            model_with_system = self.gen_model
+        
+        generation_config = {
+            'temperature': temperature if temperature is not None else self.default_temp,
+            'max_output_tokens': self.max_tokens
+        }
+        
+        for key in ['top_p', 'top_k']:
+            if key in kwargs:
+                generation_config[key] = kwargs[key]
+        
+        if chat_history:
+            last_message = chat_history.pop() if chat_history else {'role': 'user', 'parts': ['Hello']}
             
-        Raises:
-            Exception: 当 API 请求失败时
-        """
-        try:
-            logger.debug(f"向 Gemini 模型 {self.model} 发送请求，消息数量: {len(messages)}")
+            chat_session = model_with_system.start_chat(history=chat_history)
+            response = await chat_session.send_message_async(
+                last_message['parts'][0],
+                generation_config=generation_config
+            )
+        else:
+            response = await model_with_system.generate_content_async(
+                "Hello",
+                generation_config=generation_config
+            )
+        
+        content = response.text
+        if not content:
+            raise ValueError("Gemini API 返回空内容")
             
-            # 分离系统消息和其他消息
-            system_instruction = None
-            chat_history = []
-            
-            for msg in messages:
-                role = msg['role']
-                content = msg['content']
-                
-                if role == 'system':
-                    # 使用第一个系统消息作为指令
-                    if system_instruction is None:
-                        system_instruction = content
-                elif role in ['user', 'assistant']:
-                    # 将标准角色映射到 Gemini 角色
-                    gemini_role = 'user' if role == 'user' else 'model'
-                    chat_history.append({
-                        'role': gemini_role,
-                        'parts': [content]
-                    })
-            
-            # 创建带系统指令的模型（如果存在）
-            if system_instruction:
-                model_with_system = genai.GenerativeModel(
-                    model_name=self.config['model'],
-                    safety_settings=self.gen_model.safety_settings,
-                    system_instruction=system_instruction
-                )
-                logger.debug(f"使用系统指令初始化 Gemini 模型")
-            else:
-                model_with_system = self.gen_model
-            
-            generation_config = {
-                'temperature': temperature if temperature is not None else self.default_temp,
-                'max_output_tokens': self.max_tokens
-            }
-            
-            # 添加其他可能的配置参数
-            for key in ['top_p', 'top_k']:
-                if key in kwargs:
-                    generation_config[key] = kwargs[key]
-            
-            # 如果有历史消息，创建带历史的聊天会话
-            if chat_history:
-                # 移除最后一条消息用于发送，保留前面的消息作为历史
-                last_message = chat_history.pop() if chat_history else {'role': 'user', 'parts': ['Hello']}
-                
-                chat_session = model_with_system.start_chat(history=chat_history)
-                logger.debug(f"创建带历史记录的 Gemini 聊天会话，历史消息数: {len(chat_history)}")
-                
-                response = await chat_session.send_message_async(
-                    last_message['parts'][0],
-                    generation_config=generation_config
-                )
-            else:
-                # 如果没有历史消息，直接生成内容
-                logger.debug(f"直接生成 Gemini 内容，无历史消息")
-                response = await model_with_system.generate_content_async(
-                    "Hello",
-                    generation_config=generation_config
-                )
-            
-            content = response.text
-            if not content:
-                raise Exception("Gemini API 返回空内容")
-                
-            logger.debug(f"Gemini 模型 {self.model} 响应成功，内容长度: {len(content)}")
-            return content
-        except Exception as e:
-            logger.error(f"Gemini API 错误 (模型 {self.model}): {e}")
-            raise
+        logger.debug(f"Gemini 模型 {self.model} 响应成功，内容长度: {len(content)}")
+        return content
 
 
 class AnthropicAdapter(BaseAdapter):
@@ -414,78 +378,58 @@ class AnthropicAdapter(BaseAdapter):
         self.client = AsyncAnthropic(api_key=api_key)
         logger.info(f"Anthropic 适配器已初始化，模型: {self.model}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"Anthropic 请求失败，第 {retry_state.attempt_number} 次重试: {retry_state.outcome.exception()}"
+        ),
+    )
     async def chat(self, messages: List[Dict[str, str]], temperature: Optional[float] = None, **kwargs) -> str:
-        """
-        执行 Anthropic 聊天请求
+        logger.debug(f"向 Anthropic 模型 {self.model} 发送请求，消息数量: {len(messages)}")
         
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            **kwargs: 其他传递给 API 的参数
+        system_msg_parts = [msg['content'] for msg in messages if msg['role'] == 'system']
+        system_msg = '\n'.join(system_msg_parts) if system_msg_parts else None
+        
+        chat_msgs = [
+            {"role": msg['role'], "content": msg['content']} 
+            for msg in messages 
+            if msg['role'] in ['user', 'assistant']
+        ]
+        
+        if chat_msgs and chat_msgs[-1]['role'] != 'user':
+            chat_msgs.append({"role": "user", "content": "请继续"})
+        
+        api_params = {
+            'model': self.model,
+            'max_tokens': self.max_tokens,
+            'temperature': temperature if temperature is not None else self.default_temp,
+            'messages': chat_msgs
+        }
+        
+        if system_msg:
+            api_params['system'] = system_msg
             
-        Returns:
-            生成的文本响应
+        for key in ['top_p', 'top_k', 'stop_sequences']:
+            if key in kwargs:
+                api_params[key] = kwargs[key]
+        
+        response = await self.client.messages.create(**api_params)
+        
+        if not response.content:
+            raise ValueError("Anthropic API 返回空内容")
             
-        Raises:
-            Exception: 当 API 请求失败时
-        """
-        try:
-            logger.debug(f"向 Anthropic 模型 {self.model} 发送请求，消息数量: {len(messages)}")
-            
-            # 分离系统消息和其他消息
-            system_msg_parts = [msg['content'] for msg in messages if msg['role'] == 'system']
-            system_msg = '\n'.join(system_msg_parts) if system_msg_parts else None
-            
-            # 过滤掉系统消息，只保留 user 和 assistant 消息
-            chat_msgs = [
-                {"role": msg['role'], "content": msg['content']} 
-                for msg in messages 
-                if msg['role'] in ['user', 'assistant']
-            ]
-            
-            # 确保消息交替出现 (user, assistant, user, ...)
-            # Anthropic 要求必须以 user 消息结尾
-            if chat_msgs and chat_msgs[-1]['role'] != 'user':
-                # 如果最后一条不是用户消息，我们添加一个空的用户消息
-                chat_msgs.append({"role": "user", "content": "请继续"})
-            
-            api_params = {
-                'model': self.model,
-                'max_tokens': self.max_tokens,
-                'temperature': temperature if temperature is not None else self.default_temp,
-                'messages': chat_msgs
-            }
-            
-            if system_msg:
-                api_params['system'] = system_msg
-                logger.debug(f"使用系统消息初始化 Anthropic 请求")
+        content_text = ""
+        for content_block in response.content:
+            if hasattr(content_block, 'text'):
+                content_text += content_block.text
                 
-            # 添加其他可选参数
-            for key in ['top_p', 'top_k', 'stop_sequences']:
-                if key in kwargs:
-                    api_params[key] = kwargs[key]
+        if not content_text:
+            raise ValueError("Anthropic API 返回空文本内容")
             
-            response = await self.client.messages.create(**api_params)
-            
-            if not response.content:
-                raise Exception("Anthropic API 返回空内容")
-                
-            # Anthropic 返回的是内容块列表，提取文本
-            content_text = ""
-            for content_block in response.content:
-                if hasattr(content_block, 'text'):
-                    content_text += content_block.text
-                elif hasattr(content_block, 'type') and content_block.type == 'text':
-                    content_text += content_block.text
-                    
-            if not content_text:
-                raise Exception("Anthropic API 返回空内容")
-                
-            logger.debug(f"Anthropic 模型 {self.model} 响应成功，内容长度: {len(content_text)}")
-            return content_text
-        except Exception as e:
-            logger.error(f"Anthropic API 错误 (模型 {self.model}): {e}")
-            raise
+        logger.debug(f"Anthropic 模型 {self.model} 响应成功，内容长度: {len(content_text)}")
+        return content_text
 
 
 class OpenAICompatibleAdapter(OpenAIAdapter):
@@ -503,37 +447,36 @@ class DoubaoAdapter(BaseAdapter):
         if not api_key:
             raise ValueError("豆包适配器需要 'api_key' 配置")
             
-        # 使用 OpenAI 客户端，但配置为豆包 API
-        self.client = openai.AsyncOpenAI(  # 使用异步客户端
+        self.client = openai.AsyncOpenAI(
             base_url=config.get('base_url', 'https://ark.cn-beijing.volces.com/api/v3'),
             api_key=api_key,
-            timeout=config.get('timeout', 120)  # 增加默认超时时间到120秒
+            timeout=config.get('timeout', 120)
         )
-        self.timeout = config.get('timeout', 120)  # 增加默认超时时间
+        self.timeout = config.get('timeout', 120)
         logger.info(f"豆包适配器已初始化，模型: {self.model}")
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((openai.APITimeoutError, openai.APIConnectionError, openai.RateLimitError)),
+        before_sleep=lambda retry_state: logger.warning(
+            f"豆包请求失败，第 {retry_state.attempt_number} 次重试: {retry_state.outcome.exception()}"
+        ),
+    )
     async def chat(self, messages: List[Dict[str, str]], temperature: Optional[float] = None, **kwargs) -> str:
-        """
-        执行豆包聊天请求
-        """
-        try:
-            logger.debug(f"向豆包模型 {self.model} 发送请求，消息数量: {len(messages)}")
+        logger.debug(f"向豆包模型 {self.model} 发送请求，消息数量: {len(messages)}")
+        
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature if temperature is not None else self.default_temp,
+            max_tokens=self.max_tokens,
+            **kwargs
+        )
+        
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError("豆包API 返回空内容")
             
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature if temperature is not None else self.default_temp,
-                max_tokens=self.max_tokens,
-                timeout=self.timeout,  # 显式设置超时
-                **kwargs
-            )
-            
-            content = response.choices[0].message.content
-            if content is None:
-                raise Exception("豆包API 返回空内容")
-                
-            logger.debug(f"豆包模型 {self.model} 响应成功，内容长度: {len(content)}")
-            return content
-        except Exception as e:
-            logger.error(f"豆包API 错误 (模型 {self.model}): {e}")
-            raise
+        logger.debug(f"豆包模型 {self.model} 响应成功，内容长度: {len(content)}")
+        return content

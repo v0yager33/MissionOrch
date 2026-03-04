@@ -207,3 +207,5 @@ marimo/_lsp/
 __marimo__/
 data/
 env/
+logs/
+test_output.log

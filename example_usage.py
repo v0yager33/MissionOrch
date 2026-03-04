@@ -22,7 +22,7 @@ async def main():
     
     # 创建编排器
     orchestrator = COAOrchestrator()
-    print(f"✓ 编排器已初始化")
+    print("✓ 编排器已初始化")
     print(f"  - 规划智能体: {orchestrator.planner.model_id}")
     print(f"  - 评估智能体: {orchestrator.judge.model_id}")
     print(f"  - 反思智能体: {orchestrator.reflector.model_id}")

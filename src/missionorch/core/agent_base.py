@@ -1,4 +1,5 @@
 import asyncio
+import json as json_module
 import logging
 import os
 import re
@@ -10,6 +11,9 @@ from .model_router import ModelRouter
 from .rag_manager import RAGManager
 
 logger = logging.getLogger(__name__)
+
+# 专用的交互日志记录器，记录每个 Agent 的输入输出
+interaction_logger = logging.getLogger("missionorch.interactions")
 
 
 class AgentConfigError(Exception):
@@ -129,23 +133,16 @@ class BaseAgent:
         try:
             logger.debug(f"Generating response for agent '{self.agent_type}' with content length: {len(user_content)}")
             
-            # 构建消息，安全地处理格式化以避免JSON中的大括号被误解析
-            import re
             prompt = self.system_prompt
             for key, value in (context or {}).items():
-                # 使用正则表达式进行安全的字符串替换，避免特殊字符的影响
-                # 匹配 {key} 模式，其中key是变量名，不包含空格或其他特殊字符
-                pattern = r'\{' + re.escape(key) + r'\}'
+                placeholder = "{" + key + "}"
                 
-                # 将值转为字符串，如果是复杂对象则转换为JSON字符串
                 if isinstance(value, (dict, list)):
-                    import json
-                    replacement = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+                    replacement = json_module.dumps(value, ensure_ascii=False, indent=2)
                 else:
                     replacement = str(value)
                 
-                # 使用正则表达式替换，确保只替换完整的变量占位符
-                prompt = re.sub(pattern, replacement, prompt)
+                prompt = prompt.replace(placeholder, replacement)
             
             temp = temp_override
             if temp is None and 'temperature_override' in self.agent_cfg:
@@ -156,8 +153,31 @@ class BaseAgent:
                 {"role": "user", "content": user_content}
             ]
             
+            # 记录发送给 LLM 的完整输入
+            separator = "=" * 80
+            interaction_logger.info(
+                f"\n{separator}\n"
+                f"[AGENT: {self.agent_type}] [MODEL: {self.model_id}] [TEMP: {temp}]\n"
+                f"{separator}\n"
+                f"--- SYSTEM PROMPT ({len(prompt)} chars) ---\n"
+                f"{prompt}\n"
+                f"--- USER CONTENT ({len(user_content)} chars) ---\n"
+                f"{user_content}\n"
+                f"{separator}"
+            )
+            
             response = await self.model.chat(messages, temperature=temp)
-            logger.debug(f"Generated response with length: {len(response) if response else 0}")
+            
+            # 记录 LLM 返回的完整输出
+            interaction_logger.info(
+                f"\n{separator}\n"
+                f"[AGENT: {self.agent_type}] [RESPONSE] ({len(response) if response else 0} chars)\n"
+                f"{separator}\n"
+                f"{response}\n"
+                f"{separator}"
+            )
+            
+            logger.info(f"Agent '{self.agent_type}' generated response: {len(response) if response else 0} chars")
             return response
         except Exception as e:
             logger.error(f"Generation failed for agent '{self.agent_type}': {e}")

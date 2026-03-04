@@ -30,7 +30,7 @@ def validate_models_config(config_path="config/models.yaml"):
         models = config['models']
         required_fields = ['provider', 'model']
         
-        valid_providers = ['openai', 'gemini', 'anthropic', 'openai_compatible']
+        valid_providers = ['openai', 'gemini', 'anthropic', 'openai_compatible', 'doubao']
         
         for model_id, model_config in models.items():
             print(f"  检查模型: {model_id}")

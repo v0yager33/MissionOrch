@@ -39,21 +39,32 @@
   "is_valid": true,
   "validation_feedback": "验证反馈信息",
   "issues_found": ["问题1", "问题2"],
-  "corrected_coa": {...},  // 修正后的COA
+  "corrected_coa": {...},
   "pure_matrix_data": {
-    "entities": ["实体1", "实体2"],
-    "time_periods": ["T+0", "T+15"],
+    "entities": ["F-35_001", "AWACS_001"],
+    "events": ["ARRIVE_TARGET", "THREAT_DETECTED", "MISSION_COMPLETE"],
     "matrix": {
-      "实体1": {
-        "T+0": ["任务1", "任务2"],
-        "T+15": ["任务3"]
+      "F-35_001": {
+        "ARRIVE_TARGET": [{"task_id": "PATROL_A", "task_type": "DCA"}],
+        "THREAT_DETECTED": [{"task_id": "INTERCEPT_C", "task_type": "DCA"}],
+        "MISSION_COMPLETE": [{"task_id": "RTB_D", "task_type": "STRIKE"}]
       }
     },
     "task_details": {
-      "任务1": {
+      "PATROL_A": {
         "type": "DCA",
-        "description": "任务描述",
-        "resources": "所需资源"
+        "description": "防御性制空巡逻",
+        "resources": "2xF-35",
+        "location": "COORDINATES_A",
+        "start_condition": "ARRIVE_TARGET",
+        "end_condition": "THREAT_DETECTED"
+      }
+    },
+    "simulation_params": {
+      "F-35_001": {
+        "initial_state": "ACTIVE",
+        "initial_position": "BASE_COORDS",
+        "capabilities": ["AIR_TO_AIR", "STEALTH"]
       }
     }
   }
