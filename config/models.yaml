@@ -1,0 +1,73 @@
+# 模型API配置 - 纯连接参数，按厂商分类
+models:
+  openai_gpt4o:
+    provider: openai
+    api_key: ${OPENAI_API_KEY}
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
+    default_temperature: 0.2
+    max_tokens: 4096
+
+  gemini_pro:
+    provider: gemini
+    api_key: ${GEMINI_API_KEY}
+    model: gemini-1.5-pro-latest
+    default_temperature: 0.3
+    max_tokens: 8192
+
+  anthropic_claude:
+    provider: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+    model: claude-3-5-sonnet-20241022
+    default_temperature: 0.2
+    max_tokens: 4096
+
+  seed_doubao:
+    provider: doubao
+    api_key: ${ARK_API_KEY}
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model: doubao-seed-2-0-pro-260215
+    default_temperature: 0.3
+    timeout: 120
+
+  qwen_max:
+    provider: openai_compatible
+    api_key: ${DASHSCOPE_API_KEY}
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    model: qwen-max
+    default_temperature: 0.2
+
+  deepseek_chat:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    default_temperature: 0.3
+
+  deepseek_reasoner:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    model: deepseek-reasoner
+    default_temperature: 0.6
+
+  local_qwen:
+    provider: openai_compatible
+    base_url: http://localhost:11434/v1
+    model: qwen2.5:72b
+    api_key: "ollama"
+    default_temperature: 0.4
+
+# 嵌入模型配置
+embeddings:
+  openai_emb:
+    provider: openai
+    api_key: ${OPENAI_API_KEY}
+    model: text-embedding-3-large
+    dimensions: 3072
+    
+  dashscope_emb:
+    provider: dashscope
+    api_key: ${DASHSCOPE_API_KEY}
+    model: text-embedding-v2
+    dimensions: 1536

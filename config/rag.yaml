@@ -1,0 +1,39 @@
+# RAG全局开关与配置
+rag:
+  enabled: true                   # 总开关
+  working_dir: "./knowledge_base/rag_storage"
+  
+  # RAG-Anything配置
+  parser: mineru
+  enable_image_processing: true   # 解析作战地图
+  enable_table_processing: true   # 解析装备参数表
+  enable_equation_processing: false
+  
+  # 知识图谱配置
+  knowledge_graph:
+    enable: true
+    entity_types: ["UNIT", "TASK", "EQUIPMENT", "TERRAIN", "DOCTRINE"]
+    relation_types: ["ASSIGNED_TO", "OPERATES_IN", "DEPENDS_ON", "SUPPORTS"]
+  
+  # 知识库源（自动索引）
+  knowledge_sources:
+    doctrines:
+      path: "knowledge_base/doctrines"
+      file_types: [".pdf", ".docx"]
+      description: "作战条例与战术手册"
+      
+    maps:
+      path: "knowledge_base/maps"
+      file_types: [".jpg", ".png", ".pdf"]
+      description: "作战地图与态势图"
+      
+    historical:
+      path: "knowledge_base/historical"
+      file_types: [".pdf", ".txt"]
+      description: "历史战例与战后报告"
+
+# 检索配置
+retrieval:
+  search_mode: "hybrid"           # hybrid/local/global
+  top_k: 5
+  score_threshold: 0.7

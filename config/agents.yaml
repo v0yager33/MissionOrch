@@ -1,0 +1,42 @@
+# 智能体角色配置 - 引用models.yaml中的ID
+agents:
+  planner:
+    model_id: seed_doubao        # 可改为 qwen_max / seed_doubao 等
+    prompt_file: src/missionorch/prompts/planner.txt
+    temperature_override: 0.1     # 可选：覆盖默认温度
+    use_rag: false                 # RAG开关
+    rag_retrieval_depth: 5
+    
+  judge:
+    model_id: seed_doubao          # 长上下文适合评估
+    prompt_file: src/missionorch/prompts/judge.txt
+    use_rag: false                # 评估通常不需要RAG
+    criteria:
+      - feasibility
+      - completeness
+      - risk_assessment
+      - synchronization
+      - resource_efficiency
+
+  reflector:
+    model_id: seed_doubao   # 推理模型适合反思
+    prompt_file: src/missionorch/prompts/reflector.txt
+    use_rag: false
+    use_reasoning_chain: true
+
+  validator:
+    model_id: seed_doubao        # 验证需要准确性，使用GPT-4o
+    prompt_file: src/missionorch/prompts/validator.txt
+    temperature_override: 0.0     # 低温度确保一致性
+    use_rag: false                # 验证不需要RAG
+    validation_rules:
+      - format_compliance
+      - logical_consistency
+      - resource_feasibility
+      - timeline_feasibility
+
+# 工作流配置
+workflow:
+  max_iterations: 3
+  quality_threshold: 8.0
+  early_stop: true
