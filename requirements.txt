@@ -4,3 +4,4 @@ openai>=1.0.0
 google-generativeai>=0.3.0
 anthropic>=0.18.0
 tenacity>=8.2.0
+raganything[all]
