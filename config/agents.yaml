@@ -1,0 +1,66 @@
+# ============================================================================
+# Agent 角色配置 —— 6 个 Agent 的完整流水线
+# 引用 config/models.yaml 中定义的 model_id
+# 注意 prompt_file 路径相对项目根目录；新版 prompts 在 src/missionorch_lc/prompts/
+# ============================================================================
+
+agents:
+  # ── 1. 任务分析 ──
+  analyst:
+    model_id: seed_doubao
+    prompt_file: src/missionorch_lc/prompts/analyst.txt
+    temperature_override: 0.0           # 结构化输出需要确定性
+    use_rag: false
+
+  # ── 2. 知识研究（ReAct 主动调用 RAG）──
+  researcher:
+    model_id: seed_doubao               # 必须支持 tool calling
+    prompt_file: src/missionorch_lc/prompts/researcher.txt
+    temperature_override: 0.2
+    use_rag: true
+    max_tool_calls: 6                   # ReAct 工具调用硬上限
+
+  # ── 3. 规划 ──
+  planner:
+    model_id: seed_doubao
+    prompt_file: src/missionorch_lc/prompts/planner.txt
+    temperature_override: 0.1
+    use_rag: true                       # Planner 接收 Researcher 简报作为 knowledge
+    rag_retrieval_depth: 5
+
+  # ── 4. 评估 ──
+  judge:
+    model_id: seed_doubao
+    prompt_file: src/missionorch_lc/prompts/judge.txt
+    use_rag: false
+    criteria:
+      - feasibility
+      - completeness
+      - risk_assessment
+      - synchronization
+      - resource_efficiency
+
+  # ── 5. 反思 ──
+  reflector:
+    model_id: seed_doubao
+    prompt_file: src/missionorch_lc/prompts/reflector.txt
+    use_rag: false
+    use_reasoning_chain: true
+
+  # ── 6. 验证 ──
+  validator:
+    model_id: seed_doubao
+    prompt_file: src/missionorch_lc/prompts/validator.txt
+    temperature_override: 0.0
+    use_rag: false
+    validation_rules:
+      - format_compliance
+      - logical_consistency
+      - resource_feasibility
+      - timeline_feasibility
+
+# ── 主循环控制 ──
+workflow:
+  max_iterations: 3                     # plan→judge→reflect 循环最大次数
+  quality_threshold: 8.0                # 达到此分数 early stop
+  early_stop: true

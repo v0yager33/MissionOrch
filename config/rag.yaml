@@ -1,0 +1,67 @@
+# ============================================================================
+# RAG 全局配置 —— LightRAG (RAG-Anything) + 本地 Qwen3 模型
+# ============================================================================
+
+rag:
+  enabled: true                       # 总开关：false 时整个 Researcher 节点降级
+  working_dir: "./knowledge_base/rag_storage"
+
+  # ── 本地嵌入 / 重排序模型 ──
+  # 这些路径在 RAGManager 初始化时被读取，传给 build_local_embedding_func / build_local_rerank_func
+  embedding:
+    model_path: "/chatgpt_nas/dukaixuan.dkx/models/Qwen3-Embedding-0.6B"
+    device: "auto"                    # auto / cpu / cuda / cuda:0
+    max_length: 8192
+    batch_size: 8
+    instruction: "Given a military operation query, retrieve relevant doctrines, maps and historical cases that answer the query"
+
+  reranker:
+    enabled: true
+    model_path: "/chatgpt_nas/dukaixuan.dkx/models/Qwen3-Reranker-0.6B"
+    device: "auto"
+    max_length: 8192
+
+  # ── LightRAG 后端使用的 LLM（走 ModelRouter 中的 model_id）──
+  llm_model_id: "seed_doubao"         # 用于实体抽取、知识图谱构建、最终摘要
+  vision_model_id: null               # 可设为 "qwen_vl" 等以解析地图图片；null 时走纯文本
+
+  # ── RAG-Anything 解析配置 ──
+  parser: "mineru"                    # mineru / docling
+  enable_image_processing: true       # 解析作战地图
+  enable_table_processing: true       # 解析装备参数表
+  enable_equation_processing: false
+
+  # ── 知识图谱配置（仅作元信息记录；当前 LightRAG 默认抽取所有实体/关系类型）──
+  knowledge_graph:
+    enable: true
+    entity_types: ["UNIT", "TASK", "EQUIPMENT", "TERRAIN", "DOCTRINE", "ORG", "LOCATION"]
+    relation_types: ["ASSIGNED_TO", "OPERATES_IN", "DEPENDS_ON", "SUPPORTS", "ENGAGES"]
+
+  # ── 知识库源（每个 source 独立 working_dir、独立索引）──
+  knowledge_sources:
+    doctrines:
+      path: "knowledge_base/doctrines"
+      file_types: [".pdf", ".docx", ".md", ".txt"]
+      description: "作战条例与战术手册"
+
+    maps:
+      path: "knowledge_base/maps"
+      file_types: [".jpg", ".jpeg", ".png", ".pdf"]
+      description: "作战地图与态势图"
+
+    historical:
+      path: "knowledge_base/historical"
+      file_types: [".pdf", ".txt", ".md"]
+      description: "历史战例与战后报告"
+
+    glossary:
+      path: "knowledge_base/glossary"
+      file_types: [".md", ".csv", ".txt"]
+      description: "术语 / 缩略语 / 装备代号"
+
+# ── 检索默认参数 ──
+retrieval:
+  search_mode: "hybrid"               # hybrid / local / global / naive
+  top_k: 5
+  score_threshold: 0.6
+  rerank_top_n: 10                    # rerank 之后保留多少条进上下文

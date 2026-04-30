@@ -1,0 +1,122 @@
+# 仿真系统事件和条件参考清单
+
+## 1. 时间事件（Temporal Events）
+- TIME_REACHED: 达到指定时间
+- DURATION_ELAPSED: 持续时间已过
+- SCHEDULED_EVENT: 预定事件触发
+- TIMEOUT_OCCURRED: 超时发生
+- PERIODIC_TRIGGER: 周期性触发
+- DEADLINE_MET: 截止时间到达
+
+## 2. 空间事件（Spatial Events）
+- POSITION_REACHED: 到达指定位置
+- PROXIMITY_DETECTED: 接近检测
+- AREA_ENTERED: 进入区域
+- AREA_EXITED: 离开区域
+- COLLISION_DETECTED: 碰撞检测
+- PATH_CLEARED: 路径清空
+
+## 3. 状态事件（State Events）
+- STATE_CHANGED: 状态改变
+- THRESHOLD_CROSSED: 阈值跨越
+- CONDITION_MET: 条件满足
+- STATUS_UPDATE: 状态更新
+- HEALTH_DEGRADED: 健康度下降
+- RESOURCE_DEPLETED: 资源耗尽
+
+## 4. 检测事件（Detection Events）
+- TARGET_ACQUIRED: 目标捕获
+- THREAT_DETECTED: 威胁检测
+- CONTACT_ESTABLISHED: 接触建立
+- IDENTIFICATION_MADE: 识别完成
+- CLASSIFICATION_COMPLETED: 分类完成
+- TRACK_INITIATED: 跟踪启动
+
+## 5. 作战事件（Combat Events）
+- ENGAGEMENT_STARTED: 交战开始
+- WEAPON_FIRED: 武器发射
+- HIT_REGISTERED: 命中登记
+- DAMAGE_ASSESSED: 损伤评估
+- KILL_CONFIRMED: 击毁确认
+- MISSION_ACCOMPLISHED: 任务完成
+
+## 6. 通信事件（Communication Events）
+- MESSAGE_RECEIVED: 消息接收
+- COMMAND_ISSUED: 命令下达
+- RESPONSE_ACKNOWLEDGED: 响应确认
+- COMMUNICATION_LOST: 通信丢失
+- DATA_LINK_ESTABLISHED: 数据链建立
+- FREQUENCY_CHANGED: 频率改变
+
+## 7. 环境事件（Environmental Events）
+- WEATHER_CHANGED: 天气变化
+- TERRAIN_MODIFIED: 地形改变
+- OBSTACLE_DETECTED: 障碍物检测
+- VISIBILITY_CHANGED: 能见度变化
+- ELECTROMAGNETIC_INTERFERENCE: 电磁干扰
+- ATMOSPHERIC_CONDITIONS_CHANGED: 大气条件改变
+
+## 8. 系统事件（System Events）
+- SYSTEM_BOOTED: 系统启动
+- COMPONENT_FAILED: 组件故障
+- SYSTEM_RESTORED: 系统恢复
+- MAINTENANCE_REQUIRED: 需要维护
+- UPGRADE_AVAILABLE: 升级可用
+- CALIBRATION_NEEDED: 需要校准
+
+## 9. 逻辑条件（Logical Conditions）
+- AND: 逻辑与
+- OR: 逻辑或
+- NOT: 逻辑非
+- XOR: 逻辑异或
+- IF_THEN: 如果-那么
+- COMPARISON: 比较运算
+
+## 10. 数值条件（Numerical Conditions）
+- GREATER_THAN: 大于
+- LESS_THAN: 小于
+- EQUAL_TO: 等于
+- GREATER_EQUAL: 大于等于
+- LESS_EQUAL: 小于等于
+- NOT_EQUAL: 不等于
+- IN_RANGE: 在范围内
+- OUT_OF_RANGE: 超出范围
+
+## 11. 统计条件（Statistical Conditions）
+- PERCENTAGE_THRESHOLD: 百分比阈值
+- COUNT_THRESHOLD: 计数阈值
+- AVERAGE_THRESHOLD: 平均值阈值
+- STANDARD_DEVIATION: 标准差
+- PROBABILITY_BASED: 基于概率
+- CONFIDENCE_LEVEL: 置信水平
+
+## 12. 复合条件（Composite Conditions）
+- TIME_SPACE_COMBINED: 时空复合条件
+- MULTI_SENSOR_FUSION: 多传感器融合条件
+- COORDINATED_ACTION: 协同行动条件
+- HIERARCHICAL_TRIGGER: 层次触发条件
+- ADAPTIVE_CONDITION: 自适应条件
+- CONTEXT_AWARE: 上下文感知条件
+
+## 13. 事件参数（Event Parameters）
+- event_type: 事件类型
+- event_source: 事件源
+- event_target: 事件目标
+- event_time: 事件时间
+- event_location: 事件位置
+- event_severity: 事件严重性
+- event_priority: 事件优先级
+- event_payload: 事件负载
+
+## 14. 条件表达式（Condition Expressions）
+- condition_id: 条件ID
+- condition_type: 条件类型
+- operand_1: 操作数1
+- operand_2: 操作数2
+- operator: 操作符
+- evaluation_frequency: 评估频率
+- evaluation_context: 评估上下文
+- condition_result: 条件结果
+
+## 使用说明
+这些事件和条件类型为仿真系统提供了丰富的触发机制，可用于构建复杂的动态行为模型。它们可以单独使用或组合使用，以创建逼真的仿真场景。

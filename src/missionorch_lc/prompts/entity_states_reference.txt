@@ -1,0 +1,118 @@
+# 军事实体状态参考清单
+
+## 1. 平台状态（Platform Status）
+- ACTIVE - 活跃状态，完全可操作
+- STANDBY - 待命状态，准备就绪
+- DEPLOYING - 部署中
+- REPOSITIONING - 重新定位中
+- MAINTENANCE - 维护状态
+- INOP - 不可操作
+- DISABLED - 损坏/失能
+- DESTROYED - 被摧毁
+- RTB - 返航
+- REFUELING - 加油/充电
+- REARMING - 重新装弹
+- REPAIRING - 修理中
+
+## 2. 作战状态（Combat Status）
+- PATROL - 巡逻
+- ENGAGED - 交战中
+- ENGAGING - 发起攻击
+- BEING_ATTACKED - 被攻击
+- EVADING - 规避中
+- ESCAPING - 撤退
+- SCREENING - 掩护
+- ESCORTING - 护航
+- COVERING - 掩护火力
+- RECONNAISSANCE - 侦察
+- SURVEILLANCE - 监视
+- INTERCEPT - 拦截
+
+## 3. 任务状态（Mission Status）
+- MISSION_START - 任务开始
+- MISSION_ACTIVE - 任务进行中
+- MISSION_COMPLETE - 任务完成
+- MISSION_ABORTED - 任务中止
+- MISSION_HOLD - 任务暂停
+- MISSION_TRANSFER - 任务移交
+- ON_STATION - 就位
+- TRANSIT - 转移中
+- ASSEMBLE - 集结
+- DISPERSE - 分散
+
+## 4. 传感器状态（Sensor Status）
+- SEARCH - 搜索
+- TRACK - 跟踪
+- LOCKED - 锁定目标
+- BLIND - 传感器失效
+- JAMMED - 被干扰
+- ECM_ACTIVE - 电子对抗开启
+- PASSIVE - 被动模式
+- ACTIVE - 主动模式
+
+## 5. 通信状态（Communication Status）
+- COMM_ACTIVE - 通信活跃
+- COMM_JAMMED - 通信被干扰
+- COMM_DOWN - 通信中断
+- COMM_SECURE - 安全通信
+- COMM_BROADCAST - 广播状态
+- SILENT_OP - 静默操作
+
+## 6. 导航状态（Navigation Status）
+- NAV_GPS - GPS导航
+- NAV_INS - 惯性导航
+- NAV_STAR - 星光导航
+- NAV_DEAD_RECK - 推算导航
+- NAV_LOST - 导航丢失
+
+## 7. 燃料/能源状态（Fuel/Energy Status）
+- FUEL_FULL - 燃料充足
+- FUEL_NORMAL - 燃料正常
+- FUEL_LOW - 燃料低
+- FUEL_CRITICAL - 燃料危急
+- POWER_NORMAL - 电力正常
+- POWER_LOW - 电力低
+- POWER_CRITICAL - 电力危急
+
+## 8. 环境状态（Environmental Status）
+- WEATHER_CLEAR - 天气良好
+- WEATHER_POOR - 天气恶劣
+- VISIBILITY_GOOD - 能见度良好
+- VISIBILITY_POOR - 能见度差
+- TERRAIN_FLAT - 地形平坦
+- TERRAIN_ROUGH - 地形复杂
+
+## 9. 编队状态（Formation Status）
+- FORMATION_TIGHT - 紧密编队
+- FORMATION_LOOSE - 松散编队
+- FORMATION_BROKEN - 编队分散
+- FORMATION_LEADER - 编队长机
+- FORMATION_WINGMAN - 编队僚机
+- FORMATION_JOIN - 加入编队
+- FORMATION_LEAVE - 离开编队
+
+## 10. 指挥控制状态（Command Control Status）
+- UNDER_COMMAND - 受指挥控制
+- AUTONOMOUS - 自主行动
+- LINKED_UP - 链接上级
+- ISOLATED - 孤立状态
+- REPORTING - 报告状态
+- REQUESTING - 请求支援
+
+## 11. 特殊能力状态（Special Capability Status）
+- STEALTH_ACTIVE - 隐身模式
+- AFTERBURNER - 加力燃烧
+- AAR_CAPABLE - 可空中加油
+- SUBMERGED - 潜水状态（潜艇）
+- SURFACE - 水面状态（潜艇）
+
+## 12. 时间相关状态（Time-related Status）
+- READY_NOW - 立即可用
+- READY_SOON - 即将可用
+- READY_LATER - 稍后可用
+- TIMED_OUT - 超时
+- DELAYED - 延迟
+- ON_SCHEDULE - 按时
+
+## 使用说明
+这些状态可以组合使用，例如一个F-35战机可能同时处于ACTIVE + PATROL + NAV_GPS + COMM_ACTIVE + FUEL_NORMAL状态。

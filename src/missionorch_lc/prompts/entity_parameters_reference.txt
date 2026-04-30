@@ -1,0 +1,136 @@
+# 军事实体属性和参数参考清单
+
+## 1. 基础属性（Basic Attributes）
+- entity_id: 实体唯一标识符
+- entity_type: 实体类型（FIGHTER, BOMBER, FRIGATE, TANK等）
+- nationality: 国籍/归属
+- unit: 所属单位
+- callsign: 呼号
+- class: 平台型号/级别
+- weight: 重量（干重/满载重）
+- crew_size: 乘员数量
+- service_date: 服役日期
+- operational_status: 作战状态
+
+## 2. 性能参数（Performance Parameters）
+- max_speed: 最大速度
+- cruise_speed: 巡航速度
+- max_altitude: 最大高度
+- ceiling: 实用升限
+- range: 作战半径
+- endurance: 续航时间
+- climb_rate: 爬升率
+- turn_rate: 转弯率
+- acceleration: 加速度
+- fuel_capacity: 燃料容量
+- fuel_consumption: 燃料消耗率
+
+## 3. 传感器参数（Sensor Parameters）
+- radar_type: 雷达类型
+- radar_range: 雷达探测距离
+- radar_cross_section: 雷达反射截面积
+- ir_signature: 红外特征
+- acoustic_signature: 声学特征
+- visual_signature: 视觉特征
+- sensor_fov: 传感器视场角
+- detection_probability: 探测概率
+- tracking_accuracy: 跟踪精度
+- jamming_resistance: 抗干扰能力
+
+## 4. 武器系统参数（Weapon System Parameters）
+- weapon_type: 武器类型
+- ammo_capacity: 弹药容量
+- reload_time: 重新装填时间
+- fire_rate: 射速
+- accuracy: 命中精度
+- lethal_radius: 致命半径
+- engagement_range_min: 最小交战距离
+- engagement_range_max: 最大交战距离
+- guidance_type: 制导方式
+- warhead_type: 战斗部类型
+
+## 5. 机动性参数（Mobility Parameters）
+- agility: 机动性
+- maneuverability: 操纵性
+- acceleration_time: 加速时间
+- deceleration_time: 减速时间
+- turning_radius: 转弯半径
+- climb_capability: 爬升能力
+- dive_capability: 俯冲能力
+- stealth_capability: 隐身能力
+
+## 6. 生存能力参数（Survivability Parameters）
+- armor_thickness: 装甲厚度
+- armor_type: 装甲类型
+- damage_tolerance: 损伤容限
+- redundancy_systems: 冗余系统数量
+- crash_resistance: 抗坠毁能力
+- fire_suppression: 灭火能力
+- ecm_capability: 电子对抗能力
+- decoy_capacity: 诱饵投放能力
+
+## 7. 通信参数（Communication Parameters）
+- radio_type: 无线电类型
+- frequency_range: 频率范围
+- communication_range: 通信距离
+- data_link: 数据链接能力
+- encryption_level: 加密等级
+- bandwidth: 带宽
+- interference_resistance: 抗干扰能力
+- signal_strength: 信号强度
+
+## 8. 环境适应性参数（Environmental Adaptability Parameters）
+- weather_tolerance: 天气耐受性
+- temperature_range: 温度范围
+- altitude_operational: 可操作高度范围
+- terrain_adaptability: 地形适应性
+- water_resistance: 防水能力
+- dust_resistance: 防尘能力
+- vibration_tolerance: 抗振动能力
+
+## 9. 任务相关参数（Mission Related Parameters）
+- mission_type: 任务类型
+- mission_priority: 任务优先级
+- mission_duration: 任务持续时间
+- target_preference: 目标优先级
+- engagement_rules: 交战规则
+- coordination_level: 协同等级
+- autonomy_level: 自主等级
+- intelligence_level: 智能等级
+
+## 10. 维护参数（Maintenance Parameters）
+- maintenance_interval: 维护间隔
+- maintenance_time: 维护时间
+- spare_parts_ratio: 备件比例
+- maintenance_complexity: 维护复杂度
+- reliability_mtb: 平均故障间隔时间
+- availability_rate: 可用率
+- repair_time: 修复时间
+- logistics_support: 后勤保障需求
+
+## 11. 时空参数（Spatio-temporal Parameters）
+- position_x: X坐标
+- position_y: Y坐标
+- position_z: Z坐标（高度）
+- heading: 航向
+- pitch: 俯仰角
+- roll: 滚转角
+- velocity_x: X方向速度
+- velocity_y: Y方向速度
+- velocity_z: Z方向速度
+- acceleration_x: X方向加速度
+- acceleration_y: Y方向加速度
+- acceleration_z: Z方向加速度
+
+## 12. 状态参数（Status Parameters）
+- health_percentage: 健康百分比
+- fuel_percentage: 燃料百分比
+- ammunition_percentage: 弹药百分比
+- power_percentage: 电力百分比
+- heat_level: 热量水平
+- stress_level: 压力水平
+- fatigue_level: 疲劳水平
+- morale_level: 士气水平（人员单位）
+
+## 使用说明
+这些参数为仿真系统提供了军事实体的完整描述，可以用于构建精确的仿真模型。参数值应根据实际装备数据设定，并可根据仿真精度需求进行简化或细化。

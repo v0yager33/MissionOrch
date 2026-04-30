@@ -1,0 +1,44 @@
+# ============================================================================
+# MissionOrch-LC 依赖
+# ============================================================================
+
+# ── LangChain 生态 ──
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+langchain-google-genai>=2.0.0
+langgraph>=0.2.0
+
+# ── 数据与配置 ──
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+pyyaml>=6.0
+tenacity>=8.2.0
+
+# ── RAG 后端（LightRAG / RAG-Anything）──
+# RAG-Anything 暂未发布到 PyPI，按 README_zh.md 用源码安装：
+#   git clone https://github.com/HKUDS/RAG-Anything.git
+#   pip install -e RAG-Anything
+# 它本身依赖 lightrag-hku
+lightrag-hku>=1.4.0          # 知识图谱 + 向量混合检索
+numpy>=1.26.0                # 嵌入向量
+networkx>=3.2                # LightRAG 图存储
+nano-vectordb>=0.0.4.3       # LightRAG 默认向量库
+
+# ── 本地嵌入 / 重排序模型 ──
+# 走 transformers 直接加载 Qwen3-Embedding-0.6B / Qwen3-Reranker-0.6B
+# 装 GPU 版 torch 请按官方说明：https://pytorch.org/get-started/locally/
+torch>=2.1.0
+transformers>=4.45.0
+accelerate>=0.34.0           # transformers 大模型自动 device_map
+tokenizers>=0.20.0
+
+# ── 文档解析（RAG-Anything 用）──
+# mineru 解析 PDF / 表格 / 公式；docling 是备选
+# pip install mineru[core]    # 按需，体积较大
+# pip install docling         # 备选
+
+# ── 测试 ──
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
