@@ -179,12 +179,21 @@ def build_local_embedding_func(
         batch_size: 每个 batch 的最大文本数
         instruction: query 前缀指令，None 则用通用检索指令
     """
+    # lightrag 1.4+ 把 EmbeddingFunc 从 lightrag.utils 迁移到 lightrag.types
+    EmbeddingFunc = None
     try:
-        from lightrag.utils import EmbeddingFunc  # type: ignore
-    except ImportError as ie:
-        raise ImportError(
-            "lightrag 未安装。请 `pip install lightrag-hku` 或参考 docs/RAG_GUIDE.md"
-        ) from ie
+        from lightrag.utils import EmbeddingFunc as _EmbeddingFunc  # type: ignore
+
+        EmbeddingFunc = _EmbeddingFunc
+    except ImportError:
+        try:
+            from lightrag.types import EmbeddingFunc as _EmbeddingFunc  # type: ignore
+
+            EmbeddingFunc = _EmbeddingFunc
+        except ImportError as ie:
+            raise ImportError(
+                "lightrag 未安装。请 `pip install lightrag-hku` 或参考 docs/RAG_GUIDE.md"
+            ) from ie
 
     try:
         import numpy as np  # type: ignore
@@ -347,7 +356,7 @@ def build_local_rerank_func(
         ranked = sorted(
             (
                 {**(d if isinstance(d, dict) else {"content": d}), "relevance_score": float(s)}
-                for d, s in zip(documents, scores)
+                for d, s in zip(documents, scores, strict=True)
             ),
             key=lambda x: x["relevance_score"],
             reverse=True,

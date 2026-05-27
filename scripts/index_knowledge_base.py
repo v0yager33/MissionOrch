@@ -41,10 +41,26 @@ logging.basicConfig(
 logger = logging.getLogger("index_kb")
 
 
-def _file_signature(path: Path) -> str:
-    """文件名 + size + mtime 做一个轻量签名（避免重新跑 hash 整个大文件）。"""
+def _file_signature(path: Path, base_dir: Path | None = None) -> str:
+    """**相对路径** + size + mtime 做一个轻量签名（避免重新跑 hash 整个大文件）。
+
+    用相对路径而非纯文件名，是为了让 ``source_dir/A/sead.pdf`` 和
+    ``source_dir/B/sead.pdf`` 不会因为 size+mtime 偶然相同而被误判为同一文件。
+
+    Args:
+        path: 实际文件路径。
+        base_dir: 计算相对路径的基准目录（一般是 source 根目录）。
+            当 ``None`` 时退回到只用 ``path.name``，**仅为兼容旧调用**。
+    """
     stat = path.stat()
-    raw = f"{path.name}|{stat.st_size}|{int(stat.st_mtime)}"
+    if base_dir is not None:
+        try:
+            rel = path.relative_to(base_dir).as_posix()
+        except ValueError:
+            rel = path.name
+    else:
+        rel = path.name
+    raw = f"{rel}|{stat.st_size}|{int(stat.st_mtime)}"
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
@@ -109,24 +125,37 @@ async def _index_one_source(
         f"({'force=True' if force else 'incremental'})"
     )
 
+    # engine 变量保留给日志打印；真正的入库交给 manager.insert（统一朴素/MinerU 双路径）
+    _ = engine
+
     inserted = 0
     skipped = 0
     failed = 0
+
     for path in files:
-        sig = _file_signature(path)
+        sig = _file_signature(path, base_dir=src_dir)
         if sig in indexed:
             skipped += 1
             continue
+
+        logger.info(f"[{source_name}] indexing: {path.name}")
         try:
-            logger.info(f"[{source_name}] indexing: {path.name}")
-            # RAGAnything: process_document_complete 走完整流水线（含解析）
-            await engine.process_document_complete(file_path=str(path))
-            _append_indexed(record_file, sig)
-            inserted += 1
+            # 统一走 RAGManager.insert：
+            #   * .md / .txt / .csv → LightRAG.ainsert 纯文本快速路径（绕过 MinerU）
+            #   * .html / .htm / .xhtml → bs4 转 md 再走纯文本路径
+            #   * 其它（pdf / docx / doc / 图片）→ MinerU pipeline 解析
+            ok = await manager.insert(source_name, str(path))
         except Exception as ingest_error:
             logger.warning(
                 f"[{source_name}] 索引失败 {path.name}: {ingest_error}（跳过，继续下一个）"
             )
+            failed += 1
+            continue
+
+        if ok:
+            _append_indexed(record_file, sig)
+            inserted += 1
+        else:
             failed += 1
 
     logger.info(

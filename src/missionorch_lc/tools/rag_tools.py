@@ -43,19 +43,41 @@ class _RAGQueryInput(BaseModel):
 
 
 class _SourceRAGTool(BaseTool):
-    """绑定到固定 source 的 RAG 工具。子类只需指定 name / description / source_name。"""
+    """绑定到固定 source 的 RAG 工具。子类只需指定 name / description / source_name。
+
+    注意：``rag_manager`` 必须由调用方显式传入（通常通过 ``build_rag_tools`` 工厂注入），
+    没有默认值 —— 否则会在工具实例化时副作用触发模型加载，且无法保证多个工具复用
+    同一个 RAGManager 引擎缓存。
+    """
 
     args_schema: Type[BaseModel] = _RAGQueryInput
-    rag_manager: RAGManager = Field(default_factory=RAGManager)
+    rag_manager: Optional[RAGManager] = None
     source_name: str = ""
     model_config = {"arbitrary_types_allowed": True}
 
     def _run(self, query: str, mode: Optional[str] = None) -> str:  # pragma: no cover
+        """同步入口：把 _arun 跑在新线程的 loop 中，避免污染调用方 loop。"""
         import asyncio
 
-        return asyncio.get_event_loop().run_until_complete(self._arun(query, mode=mode))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # 当前线程没有 loop，可以直接 run
+            return asyncio.run(self._arun(query, mode=mode))
+
+        # 当前线程已经有 loop（例如在 Jupyter / FastAPI 协程里同步调用）→ 走线程池
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, self._arun(query, mode=mode))
+            return future.result()
 
     async def _arun(self, query: str, mode: Optional[str] = None) -> str:
+        if self.rag_manager is None:
+            return (
+                f"[RAG 未配置] 工具 {self.name} 没有绑定 RAGManager；"
+                "请通过 build_rag_tools(rag_manager=...) 创建。"
+            )
         if not self.rag_manager.is_enabled():
             return f"[RAG 未启用] 工具 {self.name} 无法返回真实结果。"
         if self.source_name not in self.rag_manager.list_sources():
@@ -63,7 +85,13 @@ class _SourceRAGTool(BaseTool):
                 f"[知识源 '{self.source_name}' 未配置] 当前可用："
                 f"{', '.join(self.rag_manager.list_sources()) or '无'}"
             )
-        text = await self.rag_manager.retrieve(query, source=self.source_name, mode=mode)
+
+        # 优先走 Multi-Query 改写；RAGManager 内部会根据配置自动降级：
+        #   - rewriter=None（未启用 / 构造失败） → 等价于单 query 单检索
+        #   - rewriter 可用 → 并发多路检索后合并去重
+        text = await self.rag_manager.retrieve_with_rewrite(
+            query, source=self.source_name, mode=mode
+        )
         if not text:
             return f"[未在 {self.source_name} 中找到相关信息] query={query!r}"
         return f"[来源: {self.source_name}]\n{text}"
@@ -130,13 +158,24 @@ def build_rag_tools(
     """根据已配置的 source 自动构建对应工具列表。
 
     Args:
-        rag_manager: 复用已有的 RAGManager；None 则按默认配置实例化
+        rag_manager: 复用已有的 RAGManager；None 则按默认配置实例化（强烈建议
+            外部统一构造一个并复用，避免重复加载本地模型权重）
         enabled_sources: 白名单；None 则根据 RAGManager 已构建的 source 自动选择
 
     Returns:
         BaseTool 列表，可直接 ``bind_tools`` 给 LLM
     """
-    manager = rag_manager or RAGManager()
+    if rag_manager is None:
+        try:
+            manager = RAGManager()
+        except Exception as init_error:
+            logger.warning(
+                f"build_rag_tools: 自动构造 RAGManager 失败: {init_error}; 返回空列表"
+            )
+            return []
+    else:
+        manager = rag_manager
+
     if not manager.is_enabled():
         logger.warning("RAGManager 未启用，build_rag_tools 返回空列表")
         return []

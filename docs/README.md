@@ -3,23 +3,36 @@
 > 基于 **LangChain + LangGraph** 的 6-Agent 战役级 COA（Course of Action）编排系统。
 > 本目录还包含：
 > - `ARCHITECTURE.md` —— 项目架构 / 数据流 / 状态机
-> - `RAG_GUIDE.md` —— RAG 怎么用、知识资源放哪、本地模型如何接入
+> - `RAG_GUIDE.md` —— 朴素 RAG 路径、Multi-Query 改写、当前可召回内容清单
+
+## 0. 当前测试通过情况（2026-05-06 最新）
+
+| 维度 | 结果 |
+|---|---|
+| pytest 全量回归 | **72 / 72 通过**（16.84s） |
+| 朴素 RAG 索引冒烟 | tmp_plain 3 文件 / 10 秒 / 0 实体 / 0 边 ✅ |
+| RAG 召回 showcase | **7 / 7 命中**（doctrines 2/2 · tmp_plain 3/3 · glossary 2/2） |
+| Multi-Query 中文 → 英文语料 | 3 / 3 命中 |
+| 端到端 6-Agent | Judge 8.5/10 首轮 ACCEPT、coa_table 9574 字、4 格式输出齐全 |
 
 ## 1. 这个项目是什么
 
 它把"指挥官给一段任务描述"到"产出可执行 COA 矩阵"的过程编排成一条
 **有向状态图**，6 个 Agent 各司其职：
 
-| 角色 | 输入 | 输出 | 用什么模型 |
+| 角色 | 输入 | 输出 | 默认模型 |
 |---|---|---|---|
-| **Analyst** 任务分析 | 自然语言任务 | JSON：意图/目标/实体/约束/研究问题 | seed_doubao |
-| **Researcher** 知识研究 | 上一步 JSON + RAG 工具 | Markdown 研究简报 | seed_doubao（需 tool calling）|
-| **Planner** 规划 | 任务 + 研究简报 + 反思 | COA 矩阵（Markdown 表格）| seed_doubao |
-| **Judge** 评估 | COA 矩阵 | 0–10 分 + 反馈 + 判定 | seed_doubao |
-| **Reflector** 反思 | COA + 反馈 | 改进建议 | seed_doubao |
-| **Validator** 验证 | 解析后的 COA 对象 | is_valid + 矩阵指标 | seed_doubao |
+| **Analyst** 任务分析 | 自然语言任务 | JSON：意图/目标/实体/约束/研究问题 | `deepseek_v4_pro` |
+| **Researcher** 知识研究 | 上一步 JSON + RAG 工具（ReAct 循环）| Markdown 研究简报 | `deepseek_chat_safe`（无 reasoning_content，避免 ReAct 多轮 400）|
+| **Planner** 规划 | 任务 + 研究简报 + 反思 | COA 矩阵（Markdown 表格）| `deepseek_v4_pro` |
+| **Judge** 评估 | COA 矩阵 | 0–10 分 × 5 维度 + 反馈 + verdict | `deepseek_v4_pro` |
+| **Reflector** 反思 | COA + 反馈 | 改进建议 | `deepseek_v4_flash` |
+| **Validator** 验证 | 解析后的 COA 对象 | is_valid + 矩阵指标 | `deepseek_v4_flash` |
 
-整个流程 = `analyst → researcher → planner ⇄ judge ⇄ reflector → finalize`，
+> **Researcher 升级**：内置 **Multi-Query** 改写（原 query → 中文翻英文 + 术语扩展 + 同义改写
+> 共 3 条并发检索后合并），中文 query 也能命中纯英文语料。详见 `RAG_GUIDE.md §3`。
+
+整个流程 = `analyst → researcher → planner ⇄ judge ⇄ reflector → validator → finalize`，
 其中 `planner ⇄ judge ⇄ reflector` 是迭代循环，直到分数达标或迭代上限。
 
 ## 2. 5 分钟跑通

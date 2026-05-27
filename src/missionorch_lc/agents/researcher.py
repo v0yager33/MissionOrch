@@ -83,6 +83,9 @@ class KnowledgeResearcherAgent(BaseAgent):
         tool_map = {t.name: t for t in tools}
         messages = prompt.format_messages(**prompt_inputs)
 
+        # 延后 import，循环里多处会用到
+        from langchain_core.messages import HumanMessage
+
         tool_calls_used = 0
         for iteration in range(self.max_tool_calls + 1):
             ai_msg = await model.ainvoke(messages, config=merged_config)
@@ -111,18 +114,58 @@ class KnowledgeResearcherAgent(BaseAgent):
                     final_text,
                 )
                 logger.info(
-                    f"Researcher 收敛: iterations={iteration}, tool_calls={tool_calls_used}"
+                    f"Researcher 收敛: iterations={iteration}, "
+                    f"tool_calls={tool_calls_used}"
                 )
                 return final_text
 
-            # 还有工具调用 → 检查是否超额
+            # 关键不变量（OpenAI 协议强制）：
+            # 一条带 tool_calls 的 assistant 消息后面，必须紧跟**每一个 tool_call_id
+            # 都有对应 ToolMessage** 的若干条 tool 消息，否则 API 报 400
+            # "insufficient tool messages following tool_calls message"。
+            #
+            # 所以即便本轮 tool_calls 会把我们推过 max_tool_calls 上限，也要把
+            # 本轮所有 tool_call 都执行（或至少回一条占位 ToolMessage）。
+            # 上限判定放在『执行完本轮所有 tool_calls 之后』再做。
+            over_limit_before = tool_calls_used >= self.max_tool_calls
+            for call in tool_calls:
+                tool_name = call.get("name")
+                tool_args = call.get("args") or {}
+                tool_id = call.get("id", "")
+                tool = tool_map.get(tool_name)
+
+                if over_limit_before:
+                    # 已经超上限，不再实际跑工具（避免继续烧 token），
+                    # 但仍然必须给每个 tool_call_id 回一条 ToolMessage
+                    content = (
+                        "[已达到工具调用上限，本次调用被跳过] "
+                        "请基于已有检索结果直接输出研究简报。"
+                    )
+                elif tool is None:
+                    content = (
+                        f"[错误] 工具 {tool_name} 未注册，"
+                        f"可用工具：{list(tool_map)}"
+                    )
+                else:
+                    try:
+                        result = await tool.ainvoke(tool_args)
+                        content = str(result)
+                    except Exception as tool_error:
+                        content = f"[工具执行失败] {tool_error}"
+
+                tool_calls_used += 1
+                messages.append(
+                    ToolMessage(content=content, tool_call_id=tool_id)
+                )
+
+            # 已达上限 → 强制收敛；关键是必须在 tool_calls 全部 ACK 之后才追加
+            # HumanMessage，否则上一条 assistant 消息的 tool_calls 没有闭合，
+            # 再跟 HumanMessage 仍会触发 400。
             if tool_calls_used >= self.max_tool_calls:
                 logger.warning(
-                    f"Researcher: 达到工具调用上限 {self.max_tool_calls}，强制收敛"
+                    f"Researcher: 达到工具调用上限 {self.max_tool_calls}，"
+                    f"强制收敛（已 ACK 本轮所有 tool_calls）"
                 )
-                # 把"请马上输出"作为新一轮 user 提示，强制收敛
-                from langchain_core.messages import HumanMessage
-
                 messages.append(
                     HumanMessage(
                         content=(
@@ -131,9 +174,11 @@ class KnowledgeResearcherAgent(BaseAgent):
                         )
                     )
                 )
-                # 用不带工具的 model 再来一发
+                # 用不带工具的 model 再请求一次，避免它又返回 tool_calls
                 close_model = self.bind_model()
-                close_msg = await close_model.ainvoke(messages, config=merged_config)
+                close_msg = await close_model.ainvoke(
+                    messages, config=merged_config
+                )
                 final_text = (
                     close_msg.content
                     if isinstance(close_msg.content, str)
@@ -141,28 +186,12 @@ class KnowledgeResearcherAgent(BaseAgent):
                 )
                 if not final_text or len(final_text.strip()) < 30:
                     final_text = self._fallback_brief(
-                        mission_analysis, reason="超额收敛后 LLM 未输出有效简报"
+                        mission_analysis,
+                        reason="超额收敛后 LLM 未输出有效简报",
                     )
                 return final_text
 
-            # 执行工具
-            for call in tool_calls:
-                tool_name = call.get("name")
-                tool_args = call.get("args") or {}
-                tool_id = call.get("id", "")
-                tool = tool_map.get(tool_name)
-                if tool is None:
-                    content = f"[错误] 工具 {tool_name} 未注册，请使用：{list(tool_map)}"
-                else:
-                    try:
-                        result = await tool.ainvoke(tool_args)
-                        content = str(result)
-                    except Exception as tool_error:
-                        content = f"[工具执行失败] {tool_error}"
-                tool_calls_used += 1
-                messages.append(ToolMessage(content=content, tool_call_id=tool_id))
-
-        # 走到这里说明 for 完整跑完仍未收敛
+        # 走到这里说明 for 完整跑完仍未收敛（iteration > max_tool_calls）
         return self._fallback_brief(
             mission_analysis, reason="ReAct 循环未在限定轮次内收敛"
         )

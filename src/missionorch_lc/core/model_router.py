@@ -24,7 +24,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import yaml
 from langchain_core.language_models import BaseChatModel
@@ -208,12 +208,15 @@ class ModelRouter:
 
         if provider in ("openai_compatible", "doubao"):
             # 豆包 / DeepSeek / Qwen / Ollama 等 OpenAI 兼容接口统一用 ChatOpenAI
+            # 透传 extra_body / reasoning_effort，使 deepseek-v4-pro 的思考模式可用：
+            #   extra_body: {thinking: {type: enabled}}
+            #   reasoning_effort: high | medium | low
             from langchain_openai import ChatOpenAI
 
             default_base_url = (
                 "https://ark.cn-beijing.volces.com/api/v3" if provider == "doubao" else None
             )
-            return ChatOpenAI(
+            chat_kwargs: Dict[str, Any] = dict(
                 model=model,
                 api_key=cfg.get("api_key") or "placeholder",
                 base_url=cfg.get("base_url", default_base_url),
@@ -222,6 +225,13 @@ class ModelRouter:
                 timeout=timeout,
                 max_retries=3,
             )
+            extra_body = cfg.get("extra_body")
+            if extra_body:
+                chat_kwargs["extra_body"] = extra_body
+            reasoning_effort = cfg.get("reasoning_effort")
+            if reasoning_effort:
+                chat_kwargs["reasoning_effort"] = reasoning_effort
+            return ChatOpenAI(**chat_kwargs)
 
         if provider == "anthropic":
             from langchain_anthropic import ChatAnthropic

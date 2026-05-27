@@ -1,5 +1,6 @@
-from .coa import COA, Phase, Unit, Action, Effect, DecisionPoint
-from .judge_result import JudgeResult, DimensionScores
+from .coa import COA, Action, DecisionPoint, Effect, Phase, Unit
+from .judge_result import DimensionScores, JudgeResult
+from .result import COAResult
 from .validation_result import ValidationResult
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "JudgeResult",
     "DimensionScores",
     "ValidationResult",
+    "COAResult",
 ]

@@ -58,6 +58,7 @@ from .core.coa_parser import COATableParser
 from .core.coa_transformer import COATransformer
 from .core.rag_manager import RAGManager
 from .schemas.coa import COA
+from .schemas.result import COAResult
 from .tools.rag_tools import build_rag_tools
 
 logger = logging.getLogger(__name__)
@@ -410,7 +411,7 @@ def _make_disabled_rag_manager(rag_config_path: str) -> RAGManager:
 
 def build_graph(
     *,
-    rag_config_path: str = "config/rag.yaml",
+    rag_config_path: str | None = None,
     use_rag: bool = True,
 ):
     """构建完整 6-Agent LangGraph，并返回
@@ -420,6 +421,10 @@ def build_graph(
         rag_config_path: RAG 配置文件路径
         use_rag: False 时强制跳过 researcher 节点（仍构建以保持图结构一致）
     """
+    if rag_config_path is None:
+        from .core.settings import get_settings
+        rag_config_path = str(get_settings().rag_config)
+
     analyst = MissionAnalystAgent()
     researcher = KnowledgeResearcherAgent()
     planner = PlannerAgent()
@@ -479,13 +484,13 @@ def build_graph(
 async def run_graph(
     mission_input: str,
     *,
-    rag_config_path: str = "config/rag.yaml",
+    rag_config_path: str | None = None,
     use_rag: bool = True,
     max_iterations: int = 3,
     quality_threshold: float = 8.0,
     early_stop: bool = True,
     extra_callbacks: Optional[List[Any]] = None,
-) -> Dict[str, Any]:
+) -> COAResult:
     """一键运行完整流水线。
 
     Returns:
@@ -520,7 +525,7 @@ async def run_graph(
     history = final_state.get("history") or []
     final_score = history[-1]["score"] if history else 0.0
 
-    result: Dict[str, Any] = {
+    result: COAResult = {
         "coa_table": final_state.get("current_coa_text", ""),
         "final_coa": (
             final_state["final_coa_obj"].model_dump(mode="json")

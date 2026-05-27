@@ -1,8 +1,4 @@
-"""Validator Agent —— 验证 COA 矩阵格式并提取仿真矩阵数据。
-
-优先使用 `model.with_structured_output(ValidationResult)`；
-如果模型不支持 function calling，则回退到 JsonOutputParser。
-"""
+"""Validator Agent —— 验证 COA 矩阵格式并提取仿真矩阵数据。"""
 
 from __future__ import annotations
 
@@ -10,9 +6,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import RunnableConfig
 
 from ..schemas.coa import COA
 from ..schemas.validation_result import ValidationResult
@@ -24,7 +19,6 @@ logger = logging.getLogger(__name__)
 class ValidatorAgent(BaseAgent):
     """验证智能体。"""
 
-    # validator.txt 的占位符白名单
     prompt_variables = ("coa_json", "mission", "validation_rules")
 
     def __init__(self) -> None:
@@ -33,12 +27,13 @@ class ValidatorAgent(BaseAgent):
             "validation_rules",
             ["matrix_completeness", "phase_progression", "unit_coordination", "effect_coverage"],
         )
-        self._structured_chain: Optional[Runnable] = None
-        self._fallback_chain: Optional[Runnable] = None
-        self._structured_supported: Optional[bool] = None
+
+        prompt = self._build_prompt()
+        self._structured_chain, self._fallback_chain = self.build_structured_chain_pair(
+            ValidationResult, prompt
+        )
         logger.info(f"ValidatorAgent initialized with rules: {self.validation_rules}")
 
-    # ── Chain 构造（懒加载） ──
     def _build_prompt(self) -> ChatPromptTemplate:
         return ChatPromptTemplate.from_messages(
             [
@@ -46,30 +41,6 @@ class ValidatorAgent(BaseAgent):
                 ("user", "请严格按 JSON 格式输出验证结果。"),
             ],
         )
-
-    def _get_structured_chain(self) -> Optional[Runnable]:
-        if self._structured_supported is False:
-            return None
-        if self._structured_chain is not None:
-            return self._structured_chain
-        try:
-            structured_model = self.bind_structured_output(ValidationResult)
-            self._structured_chain = self._build_prompt() | structured_model
-            self._structured_supported = True
-            logger.info("Validator using with_structured_output(ValidationResult)")
-            return self._structured_chain
-        except Exception as build_error:
-            logger.warning(
-                f"with_structured_output unavailable, fallback to JsonOutputParser: {build_error}"
-            )
-            self._structured_supported = False
-            return None
-
-    def _get_fallback_chain(self) -> Runnable:
-        if self._fallback_chain is None:
-            parser = JsonOutputParser(pydantic_object=ValidationResult)
-            self._fallback_chain = self._build_prompt() | self.bind_model() | parser
-        return self._fallback_chain
 
     async def validate_and_extract_matrix(
         self,
@@ -90,22 +61,14 @@ class ValidatorAgent(BaseAgent):
         }
         merged_config = self.merge_config(config, run_name="validator.validate")
 
-        result_dict: Dict[str, Any]
-        structured_chain = self._get_structured_chain()
         try:
-            if structured_chain is not None:
-                result_obj = await structured_chain.ainvoke(inputs, config=merged_config)
-                result_dict = (
-                    result_obj.model_dump()
-                    if hasattr(result_obj, "model_dump")
-                    else dict(result_obj)
-                )
-            else:
-                result_dict = await self._get_fallback_chain().ainvoke(
-                    inputs, config=merged_config
-                )
-                if not isinstance(result_dict, dict):
-                    result_dict = dict(result_dict)
+            result_dict = await self.invoke_structured(
+                ValidationResult,
+                self._structured_chain,
+                self._fallback_chain,
+                inputs,
+                config=merged_config,
+            )
         except Exception as validate_error:
             logger.error(
                 f"Validator failed, falling back to basic validation: {validate_error}"
@@ -144,20 +107,22 @@ class ValidatorAgent(BaseAgent):
             "issues_found": result_dict.get("issues_found", []),
             "validation_feedback": feedback,
         }
+
     # ── 工具方法 ──
+    _RULE_TRANSLATIONS = {
+        "matrix_completeness": "矩阵完整性：每个单元在每个阶段都应有明确行动",
+        "phase_progression": "阶段递进：转换条件应合理且由事件/条件驱动",
+        "unit_coordination": "单元协同：各单元在同一阶段的行动应协调一致",
+        "effect_coverage": "效果覆盖：行动应能有效达成预期战略效果",
+        "format_compliance": "格式合规：矩阵格式符合系统解析要求",
+        "logical_consistency": "逻辑一致：行动之间无矛盾冲突",
+        "resource_feasibility": "资源可行：资源分配不冲突",
+        "decision_point_clarity": "决策点明确：决策点条件和选项清晰",
+    }
+
     def _translate_rules(self, rules: List[str]) -> List[str]:
-        mapping = {
-            "matrix_completeness": "矩阵完整性：每个单元在每个阶段都应有明确行动",
-            "phase_progression": "阶段递进：转换条件应合理且由事件/条件驱动",
-            "unit_coordination": "单元协同：各单元在同一阶段的行动应协调一致",
-            "effect_coverage": "效果覆盖：行动应能有效达成预期战略效果",
-            "format_compliance": "格式合规：矩阵格式符合系统解析要求",
-            "logical_consistency": "逻辑一致：行动之间无矛盾冲突",
-            "resource_feasibility": "资源可行：资源分配不冲突",
-            "decision_point_clarity": "决策点明确：决策点条件和选项清晰",
-        }
-        translated = [mapping.get(rule, rule) for rule in rules]
-        return translated if translated else list(mapping.values())[:4]
+        translated = [self._RULE_TRANSLATIONS.get(rule, rule) for rule in rules]
+        return translated if translated else list(self._RULE_TRANSLATIONS.values())[:4]
 
     def _attempt_fix_coa(self, coa: COA, issues: List[str]) -> COA:
         logger.debug(f"Attempting to fix COA issues: {issues}")

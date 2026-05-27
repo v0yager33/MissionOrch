@@ -10,6 +10,14 @@ from missionorch_lc.core.callbacks import (
     TokenUsageCallback,
 )
 
+# MagicMock 在 TestTokenUsageCallback 中用作 LLMResult 的桩
+_ = MagicMock
+
+
+def _run(coro):
+    """统一的协程执行 helper：兼容 Python 3.10+，不用已废弃的 get_event_loop。"""
+    return asyncio.new_event_loop().run_until_complete(coro)
+
 
 class TestTokenUsage:
     """TokenUsage 数据类。"""
@@ -89,9 +97,7 @@ class TestTokenUsageCallback:
         }
         response.generations = []
 
-        asyncio.get_event_loop().run_until_complete(
-            callback.on_llm_end(response, run_id=uuid4())
-        )
+        _run(callback.on_llm_end(response, run_id=uuid4()))
 
         assert callback.total_tokens() == 150
         summary = callback.summary()
@@ -104,9 +110,7 @@ class TestTokenUsageCallback:
         response.llm_output = {}
         response.generations = []
 
-        asyncio.get_event_loop().run_until_complete(
-            callback.on_llm_end(response, run_id=uuid4())
-        )
+        _run(callback.on_llm_end(response, run_id=uuid4()))
 
         assert callback.total_tokens() == 0
 
@@ -131,7 +135,7 @@ class TestStageTimingCallback:
         callback = StageTimingCallback()
         run_id = uuid4()
 
-        asyncio.get_event_loop().run_until_complete(
+        _run(
             callback.on_chain_start(
                 serialized={},
                 inputs={},
@@ -143,7 +147,7 @@ class TestStageTimingCallback:
         assert len(callback.stages) == 1
         assert callback.stages[0]["end"] is None
 
-        asyncio.get_event_loop().run_until_complete(
+        _run(
             callback.on_chain_end(
                 outputs={},
                 run_id=run_id,
@@ -160,7 +164,7 @@ class TestStageTimingCallback:
         parent_id = uuid4()
         child_id = uuid4()
 
-        asyncio.get_event_loop().run_until_complete(
+        _run(
             callback.on_chain_start(
                 serialized={}, inputs={}, run_id=child_id, parent_run_id=parent_id
             )

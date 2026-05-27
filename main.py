@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """MissionOrch-LC CLI 入口。
 
-支持两种编排模式：
-    python main.py                  # 经典 Orchestrator（默认）
-    python main.py --graph          # LangGraph StateGraph 版
+默认走 6-Agent LangGraph 流水线：
+    python main.py                  # 交互模式
+    python main.py --mission "..."  # 非交互
+    python main.py --legacy         # 退回旧版 4-Agent 经典 Orchestrator
+    python main.py --no-rag         # 关闭 RAG（Researcher 节点降级）
     python main.py --help           # 查看帮助
 
 环境变量：
@@ -20,8 +22,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-# 允许直接 `python main.py` 运行
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+try:
+    import missionorch_lc  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from missionorch_lc.core.log_config import setup_logging
 
@@ -34,12 +38,17 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="MissionOrch-LC — 基于 LangChain 的 COA 编排系统"
+        description="MissionOrch-LC — 基于 LangChain + LangGraph 的 6-Agent COA 编排系统"
     )
     parser.add_argument(
-        "--graph",
+        "--legacy",
         action="store_true",
-        help="使用 LangGraph StateGraph 版本编排（默认使用经典循环版）",
+        help="使用经典 4-Agent 循环（默认走 LangGraph 6-Agent 流水线）",
+    )
+    parser.add_argument(
+        "--no-rag",
+        action="store_true",
+        help="禁用 RAG（Researcher 节点降级，不读知识库）",
     )
     parser.add_argument(
         "--mission",
@@ -72,9 +81,43 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_result(result: Dict[str, Any]) -> None:
-    """友好地打印 COA 生成结果。"""
+    """友好地打印 COA 生成结果（含 6-Agent 流水线的 analyst / researcher 阶段）。"""
+    # ── Analyst 阶段 ──
+    analysis = result.get("mission_analysis") or {}
+    if analysis:
+        print("\n" + "=" * 70)
+        print("【1/6 Analyst — 任务分析】")
+        print("=" * 70)
+        print(f"意图: {analysis.get('mission_intent', '')}")
+        objs = analysis.get("objectives", [])
+        if objs:
+            print(f"目标 ({len(objs)}):")
+            for o in objs:
+                print(
+                    f"  - [{o.get('id')}] ({o.get('priority')}) "
+                    f"{o.get('description', '')}"
+                )
+        constraints = analysis.get("constraints", [])
+        if constraints:
+            print(f"约束: {'; '.join(constraints)}")
+        queries = analysis.get("research_queries", [])
+        if queries:
+            print(f"建议研究问题 ({len(queries)}):")
+            for q in queries:
+                print(f"  · {q}")
+
+    # ── Researcher 阶段 ──
+    brief = result.get("research_brief", "")
+    if brief:
+        print("\n" + "=" * 70)
+        print("【2/6 Researcher — 研究简报】")
+        print("=" * 70)
+        # 简报太长就截断，避免淹没终端
+        print(brief if len(brief) < 2000 else brief[:2000] + "\n...(已截断)")
+
+    # ── COA 矩阵 ──
     print("\n" + "=" * 70)
-    print("【COA 矩阵方案】")
+    print("【3/6 Planner — COA 矩阵方案】")
     print("=" * 70)
     print(result.get("coa_table", "(empty)"))
     print("=" * 70)
@@ -84,6 +127,13 @@ def print_result(result: Dict[str, Any]) -> None:
     print(f"- **最终得分**: {result.get('final_score', 0)}")
     print(f"- **最佳得分**: {result.get('best_score', 0)}")
     print(f"- **矩阵解析**: {'✅ 成功' if result.get('parse_success') else '❌ 失败'}")
+    if "rag_enabled" in result:
+        rag_state = "启用" if result["rag_enabled"] else "未启用"
+        sources = result.get("rag_sources") or []
+        print(
+            f"- **RAG**: {rag_state} ({len(sources)} sources: "
+            f"{', '.join(sources) or '—'})"
+        )
 
     if result.get("parse_success"):
         final_coa = result.get("final_coa", {})
@@ -171,22 +221,41 @@ async def run_langgraph(
     mission: str,
     max_iter: int | None = None,
     threshold: float | None = None,
+    use_rag: bool = True,
 ) -> Dict[str, Any]:
-    """运行 LangGraph 版 Orchestrator。"""
+    """运行 LangGraph 6-Agent Orchestrator。"""
     from missionorch_lc.orchestrator_graph import run_graph
 
-    kwargs: Dict[str, Any] = {}
+    kwargs: Dict[str, Any] = {"use_rag": use_rag}
     if max_iter is not None:
         kwargs["max_iterations"] = max_iter
     if threshold is not None:
         kwargs["quality_threshold"] = threshold
 
     print(
-        f"📋 LangGraph 模式 | max_iter={kwargs.get('max_iterations', 3)}, "
-        f"threshold={kwargs.get('quality_threshold', 8.0)}"
+        f"📋 LangGraph 6-Agent 模式 | max_iter={kwargs.get('max_iterations', 3)}, "
+        f"threshold={kwargs.get('quality_threshold', 8.0)}, "
+        f"rag={'on' if use_rag else 'off'}"
     )
-    print("⏳ 正在生成 COA 方案...\n")
+    print("⏳ 流程: analyst → researcher → planner ⇄ judge ⇄ reflector → finalize\n")
     return await run_graph(mission, **kwargs)
+
+
+# ── 调度 ──
+
+
+async def _dispatch(mission: str, args: argparse.Namespace) -> Dict[str, Any]:
+    """根据 CLI 参数选择运行器。"""
+    if args.legacy:
+        return await run_classic(
+            mission, max_iter=args.max_iter, threshold=args.threshold
+        )
+    return await run_langgraph(
+        mission,
+        max_iter=args.max_iter,
+        threshold=args.threshold,
+        use_rag=not args.no_rag,
+    )
 
 
 # ── 交互式输入 ──
@@ -199,10 +268,8 @@ async def async_input(prompt: str) -> str:
 
 async def interactive_loop(args: argparse.Namespace) -> int:
     """交互式循环：反复读取任务描述并生成 COA。"""
-    runner = run_langgraph if args.graph else run_classic
-    mode_name = "LangGraph" if args.graph else "经典"
-
-    print(f"\n🚀 {mode_name}模式已就绪。输入任务描述开始生成（输入 quit 退出）:\n")
+    mode_name = "经典 4-Agent" if args.legacy else "LangGraph 6-Agent"
+    print(f"\n🚀 {mode_name} 模式已就绪。输入任务描述开始生成（输入 quit 退出）:\n")
 
     while True:
         mission_input = (await async_input("任务描述: ")).strip()
@@ -214,11 +281,7 @@ async def interactive_loop(args: argparse.Namespace) -> int:
             continue
 
         try:
-            result = await runner(
-                mission_input,
-                max_iter=args.max_iter,
-                threshold=args.threshold,
-            )
+            result = await _dispatch(mission_input, args)
             print_result(result)
 
             if args.output_json:

@@ -11,8 +11,8 @@ rag:
   embedding:
     model_path: "/chatgpt_nas/dukaixuan.dkx/models/Qwen3-Embedding-0.6B"
     device: "auto"                    # auto / cpu / cuda / cuda:0
-    max_length: 8192
-    batch_size: 8
+    max_length: 2048                  # 单次测试降到 2048，加速索引
+    batch_size: 4                     # 降低以减少 GPU/CPU 峰值占用
     instruction: "Given a military operation query, retrieve relevant doctrines, maps and historical cases that answer the query"
 
   reranker:
@@ -22,26 +22,32 @@ rag:
     max_length: 8192
 
   # ── LightRAG 后端使用的 LLM（走 ModelRouter 中的 model_id）──
-  llm_model_id: "seed_doubao"         # 用于实体抽取、知识图谱构建、最终摘要
+  # 索引阶段会反复调用 LLM 做实体抽取 / 关系抽取 / 摘要，务必用 *非思考* 模型。
+  # deepseek_v4_flash（非思考模式）在 models.yaml 中已配置，价格低、速度快。
+  llm_model_id: "deepseek_v4_flash"
   vision_model_id: null               # 可设为 "qwen_vl" 等以解析地图图片；null 时走纯文本
 
-  # ── RAG-Anything 解析配置 ──
+  # ── 文档解析配置（朴素 RAG 模式：只要 parse→chunk→embedding）──
+  # parser=mineru 的 pipeline backend 已覆盖 PDF / DOCX / DOC / HTML / MD / TXT，
+  # 不需要额外装 python-docx、bs4 等；如果 MinerU 某类文件解析失败，
+  # 会在 insert 层被 catch 住，打一行 warning 跳过，不影响其他文件。
   parser: "mineru"                    # mineru / docling
   enable_image_processing: true       # 解析作战地图
   enable_table_processing: true       # 解析装备参数表
   enable_equation_processing: false
 
-  # ── 知识图谱配置（仅作元信息记录；当前 LightRAG 默认抽取所有实体/关系类型）──
-  knowledge_graph:
-    enable: true
-    entity_types: ["UNIT", "TASK", "EQUIPMENT", "TERRAIN", "DOCTRINE", "ORG", "LOCATION"]
-    relation_types: ["ASSIGNED_TO", "OPERATES_IN", "DEPENDS_ON", "SUPPORTS", "ENGAGES"]
+  # 注：knowledge_graph 段已移除。
+  # 朴素 RAG 模式下 lightrag_factory.py 会在 import 时 monkey-patch 掉 LightRAG 的
+  # 实体抽取 / 关系合并 / gleaning，检索只走 mode="naive" 的向量召回。
+  # 不再需要配置 entity_types / relation_types。
 
   # ── 知识库源（每个 source 独立 working_dir、独立索引）──
+  # file_types 统一覆盖朴素 RAG 支持的所有格式：
+  #   PDF / DOCX / DOC / HTML / HTM / MD / TXT / CSV（术语表）
   knowledge_sources:
     doctrines:
       path: "knowledge_base/doctrines"
-      file_types: [".pdf", ".docx", ".md", ".txt"]
+      file_types: [".pdf", ".docx", ".doc", ".html", ".htm", ".md", ".txt"]
       description: "作战条例与战术手册"
 
     maps:
@@ -51,7 +57,7 @@ rag:
 
     historical:
       path: "knowledge_base/historical"
-      file_types: [".pdf", ".txt", ".md"]
+      file_types: [".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md"]
       description: "历史战例与战后报告"
 
     glossary:
@@ -59,9 +65,50 @@ rag:
       file_types: [".md", ".csv", ".txt"]
       description: "术语 / 缩略语 / 装备代号"
 
+    # 朴素 RAG 冒烟专用：验证 md/html/txt 三种格式解析 + 零实体抽取
+    # 不应该出现在生产使用场景；跑完后可删除此段和对应 rag_storage/tmp_plain 目录
+    tmp_plain:
+      path: "knowledge_base/tmp_plain"
+      file_types: [".md", ".html", ".htm", ".txt"]
+      description: "朴素 RAG 冒烟测试语料（md/html/txt 各一份）"
+
+# ── Chunking（索引时的切分策略，写入索引产物里固化）──
+# 修改后**必须重建索引**才能生效（已经存在的 vdb_chunks.json 不会被自动重切）。
+chunking:
+  chunk_token_size: 1200              # 单 chunk 最大 token 数
+  chunk_overlap_token_size: 100       # 相邻 chunk 重叠 token 数（提升边界召回）
+  tiktoken_model_name: "gpt-4o-mini"  # 用于 token 计数的 tokenizer 名（仅做切分计量）
+
 # ── 检索默认参数 ──
 retrieval:
-  search_mode: "hybrid"               # hybrid / local / global / naive
-  top_k: 5
-  score_threshold: 0.6
+  # naive：只走朴素向量检索（chunk-level），不做图遍历。
+  # 索引阶段 LightRAG 仍然会抽实体/关系（因为它是索引流水线的一部分），
+  # 但查询阶段完全不用图，响应快且便宜。
+  # 想体验图遍历时再切回 "hybrid"。
+  search_mode: "naive"                # hybrid / local / global / naive
+  top_k: 5                            # 实体/关系层 top_k（hybrid/local/global 用）
+  chunk_top_k: 20                     # naive 模式核心参数：召回多少 chunk 进 rerank
+  score_threshold: 0.6                # 业务层分数阈值（保留）
+  cosine_threshold: 0.2               # LightRAG 余弦阈值（< 此值的 chunk 被丢弃）
+  related_chunk_number: 5             # 实体被命中时附带召回的 related chunk 数
   rerank_top_n: 10                    # rerank 之后保留多少条进上下文
+  max_total_tokens: 30000             # 单次检索拼接进 prompt 的总 token 上限
+  max_entity_tokens: 6000             # 实体段最大 token（hybrid 模式生效）
+  max_relation_tokens: 8000           # 关系段最大 token（hybrid 模式生效）
+
+  # ── Query Rewrite（Multi-Query 多路改写）──
+  # 为什么要做？我们的 doctrines / historical 语料是英文，但用户 / Analyst
+  # 产出的 query 往往是中文；纯向量检索在跨语言时几乎必然失败。让 LLM 把
+  # 1 条 query 改写成 N 条互补的英文 query（原文直译 + 术语扩展 + 换视角），
+  # 并发检索后合并，能显著提升召回。
+  #
+  # 成本：每次 RAG 工具调用多花 1 次 LLM + (N-1) 次 aquery
+  # 关闭：把 enabled 改成 false，工具行为退化回单 query 单检索
+  query_rewrite:
+    enabled: true
+    llm_model_id: "deepseek_v4_flash"   # 走非思考模型，快且便宜
+    num_queries: 3                      # 生成多少条子 query（包含原文的直译）
+    cache_size: 256                     # LRU，同 (domain, query, n) 只改写一次
+    temperature: 0.2
+    max_tokens: 400
+    max_per_section_chars: 2500         # 每一路 retrieve 结果的截断长度

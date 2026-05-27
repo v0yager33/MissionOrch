@@ -1,6 +1,5 @@
 """prompt_loader 单元测试。"""
 
-import tempfile
 from pathlib import Path
 
 from missionorch_lc.core.prompt_loader import (

@@ -37,16 +37,64 @@ models:
     model: qwen-max
     default_temperature: 0.2
 
+  # ── DeepSeek 系列（OpenAI 兼容协议）──
+  # v4 系列：deepseek-v4-flash（轻量）/ deepseek-v4-pro（旗舰，支持思考模式）
+  # 旧版 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
+  deepseek_v4_flash:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    default_temperature: 0.3
+    timeout: 120
+    max_retries: 3
+    fallback_model_ids: ["deepseek_v4_pro"]
+
+  deepseek_v4_pro:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-pro
+    default_temperature: 0.3
+    timeout: 180
+    max_retries: 3
+    # 通过 extra_body 开启思考模式（仅 deepseek-v4-pro 支持）
+    extra_body:
+      thinking:
+        type: enabled
+    reasoning_effort: high
+
+  # 兼容旧名（2026/07/24 弃用，自动指向 v4-flash 的非思考 / 思考模式）
   deepseek_chat:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY}
+    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
     base_url: https://api.deepseek.com
     model: deepseek-chat
     default_temperature: 0.3
 
+  # ReAct / 多轮 tool-calling 专用 Alias —— 关键：新名 deepseek-v4-flash
+  # 会在响应里带 reasoning_content，下一轮必须原样回传，否则报 400
+  # "reasoning_content in the thinking mode must be passed back to the API"。
+  # LangChain ChatOpenAI 目前不会自动回传这个 provider-private 字段，
+  # 所以所有多轮循环的 Agent（Researcher ReAct、Planner 自我修正等）
+  # 必须用旧名 deepseek-chat —— 旧名的响应体只有 role+content，没有 reasoning_content，
+  # 天然避开了"回传 reasoning"的陷阱。底层仍然路由到 v4-flash，速度 / 价格不变。
+  # 已实测：httpx 直接打 v4-flash 返回 ['role','content','reasoning_content']；
+  #        打 deepseek-chat 返回 ['role','content']，与 OpenAI 协议完全一致。
+  deepseek_chat_safe:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    base_url: https://api.deepseek.com
+    model: deepseek-chat
+    default_temperature: 0.3
+    timeout: 120
+    max_retries: 3
+    # 注意：不配 fallback_model_ids —— 一旦 fallback 到 v4-flash/v4-pro 就会
+    # 重新引入 reasoning_content 问题。宁可失败也不要隐式切换。
+
   deepseek_reasoner:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY}
+    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
     base_url: https://api.deepseek.com
     model: deepseek-reasoner
     default_temperature: 0.6

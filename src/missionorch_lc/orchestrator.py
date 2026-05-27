@@ -26,6 +26,7 @@ from .core.callbacks import StageTimingCallback, TokenUsageCallback
 from .core.coa_parser import COATableParser
 from .core.coa_transformer import COATransformer
 from .schemas.coa import COA
+from .schemas.result import COAResult
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,11 @@ logger = logging.getLogger(__name__)
 class COAOrchestrator:
     """规划-评估-反思-验证的多智能体编排器。"""
 
-    def __init__(self, config_path: str = "config/agents.yaml") -> None:
+    def __init__(self, config_path: str | None = None) -> None:
+        if config_path is None:
+            from .core.settings import get_settings
+            config_path = str(get_settings().agents_config)
+
         self.planner = PlannerAgent()
         self.judge = JudgeAgent()
         self.reflector = ReflectorAgent()
@@ -77,7 +82,7 @@ class COAOrchestrator:
         mission_input: str,
         *,
         config: Optional[RunnableConfig] = None,
-    ) -> Dict[str, Any]:
+    ) -> COAResult:
         """主流程：规划 → 迭代（评估 → 反思 → 规划）→ 解析 → 验证 → 输出。
 
         Args:
@@ -219,7 +224,7 @@ class COAOrchestrator:
         total_tokens = self.token_callback.total_tokens()
         timing_summary = self.timing_callback.summary()
 
-        result: Dict[str, Any] = {
+        result: COAResult = {
             "coa_table": current_coa_text,
             "final_coa": final_coa_data,
             "parse_success": parse_success,

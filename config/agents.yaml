@@ -6,15 +6,25 @@
 
 agents:
   # ── 1. 任务分析 ──
+  # 全部用 deepseek_v4_pro（支持思考模式，reasoning_effort=high）
   analyst:
-    model_id: seed_doubao
+    model_id: deepseek_v4_pro
     prompt_file: src/missionorch_lc/prompts/analyst.txt
     temperature_override: 0.0           # 结构化输出需要确定性
     use_rag: false
 
   # ── 2. 知识研究（ReAct 主动调用 RAG）──
   researcher:
-    model_id: seed_doubao               # 必须支持 tool calling
+    # 为什么用 deepseek_chat_safe（底层是旧名 deepseek-chat，alias 到 v4-flash）：
+    # httpx 实测：
+    #   - 调 deepseek-v4-flash  → 响应体含 reasoning_content
+    #   - 调 deepseek-chat      → 响应体只有 role + content
+    # ReAct 多轮 tool-calling 里，上一轮 AI 消息要原样回传。LangChain ChatOpenAI
+    # 不会自动带 provider-specific 的 reasoning_content 字段 → 第二轮必 400
+    # "reasoning_content must be passed back"。
+    # 因此所有需要多轮 tool-calling 的 Agent 一律用 deepseek_chat_safe（旧名，
+    # 响应不含 reasoning_content，天然避开这个陷阱），速度 / 价格与 v4-flash 一致。
+    model_id: deepseek_chat_safe
     prompt_file: src/missionorch_lc/prompts/researcher.txt
     temperature_override: 0.2
     use_rag: true
@@ -22,7 +32,7 @@ agents:
 
   # ── 3. 规划 ──
   planner:
-    model_id: seed_doubao
+    model_id: deepseek_v4_pro
     prompt_file: src/missionorch_lc/prompts/planner.txt
     temperature_override: 0.1
     use_rag: true                       # Planner 接收 Researcher 简报作为 knowledge
@@ -30,7 +40,7 @@ agents:
 
   # ── 4. 评估 ──
   judge:
-    model_id: seed_doubao
+    model_id: deepseek_v4_pro
     prompt_file: src/missionorch_lc/prompts/judge.txt
     use_rag: false
     criteria:
@@ -42,14 +52,14 @@ agents:
 
   # ── 5. 反思 ──
   reflector:
-    model_id: seed_doubao
+    model_id: deepseek_v4_pro
     prompt_file: src/missionorch_lc/prompts/reflector.txt
     use_rag: false
     use_reasoning_chain: true
 
   # ── 6. 验证 ──
   validator:
-    model_id: seed_doubao
+    model_id: deepseek_v4_pro
     prompt_file: src/missionorch_lc/prompts/validator.txt
     temperature_override: 0.0
     use_rag: false
