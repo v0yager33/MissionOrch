@@ -210,6 +210,10 @@ class ModelRouter:
                     logger.warning(f"Skip fallback '{fb_id}': {fb_error}")
             if fallbacks:
                 wrapped = wrapped.with_fallbacks(fallbacks)
+        if wrapped is not model:
+            from missionorch_lc.trajectory.langchain import ScopedRunnable
+
+            wrapped = ScopedRunnable(bound=wrapped)
         return wrapped
 
     @classmethod
@@ -234,6 +238,11 @@ class ModelRouter:
         if not provider:
             raise ValueError("配置中缺少 'provider' 字段")
 
+        from missionorch_lc.trajectory.core import get_recorder
+        from missionorch_lc.trajectory.http import sdk_http_client
+        from missionorch_lc.trajectory.langchain import TracedChatMixin
+
+        get_recorder().add_secret(cfg.get("api_key"))
         model = cfg["model"]
         temperature = cfg.get("default_temperature", 0.7)
         max_tokens = int(cfg.get("max_tokens", 4096))
@@ -243,7 +252,12 @@ class ModelRouter:
         if provider == "openai":
             from langchain_openai import ChatOpenAI
 
-            return ChatOpenAI(
+            class RecordedOpenAI(TracedChatMixin, ChatOpenAI):
+                pass
+
+            return RecordedOpenAI(
+                http_client=sdk_http_client(timeout=timeout),
+                http_async_client=sdk_http_client(asynchronous=True, timeout=timeout),
                 model=model,
                 api_key=cfg.get("api_key"),
                 base_url=cfg.get("base_url"),
@@ -278,12 +292,22 @@ class ModelRouter:
             reasoning_effort = cfg.get("reasoning_effort")
             if reasoning_effort:
                 chat_kwargs["reasoning_effort"] = reasoning_effort
-            return ChatOpenAI(**chat_kwargs)
+            class RecordedCompatible(TracedChatMixin, ChatOpenAI):
+                pass
+
+            return RecordedCompatible(
+                http_client=sdk_http_client(timeout=timeout),
+                http_async_client=sdk_http_client(asynchronous=True, timeout=timeout),
+                **chat_kwargs,
+            )
 
         if provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
 
-            return ChatAnthropic(
+            class RecordedAnthropic(TracedChatMixin, ChatAnthropic):
+                pass
+
+            recorded = RecordedAnthropic(
                 model=model,
                 api_key=cfg.get("api_key"),
                 temperature=temperature,
@@ -291,17 +315,27 @@ class ModelRouter:
                 timeout=timeout,
                 max_retries=sdk_retries,
             )
+            recorded._client = recorded._client.with_options(http_client=sdk_http_client(timeout=timeout))
+            recorded._async_client = recorded._async_client.with_options(
+                http_client=sdk_http_client(asynchronous=True, timeout=timeout)
+            )
+            return recorded
 
         if provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
 
-            return ChatGoogleGenerativeAI(
+            class RecordedGemini(TracedChatMixin, ChatGoogleGenerativeAI):
+                pass
+
+            from missionorch_lc.trajectory.native import attach_native_clients
+
+            return attach_native_clients(RecordedGemini(
                 model=model,
                 google_api_key=cfg.get("api_key"),
                 temperature=temperature,
                 max_output_tokens=max_tokens,
                 timeout=timeout,
-            )
+            ))
 
         raise UnknownProviderError(f"不支持的 provider: {provider}")
 

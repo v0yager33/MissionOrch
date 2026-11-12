@@ -32,6 +32,8 @@ from .core.coa_transformer import COATransformer
 from .core.expected_outcomes import coerce_outcomes, extract_from_mission, merge_outcomes
 from .schemas.coa import COA, ExpectedOutcome
 from .schemas.result import COAResult
+from .trajectory.instrumentation import run_scope
+from .trajectory.langchain import TrajectoryCallback
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ class COAOrchestrator:
     def _base_config(self) -> RunnableConfig:
         """返回携带所有 callbacks 的基础 RunnableConfig。"""
         return RunnableConfig(
-            callbacks=[self.token_callback, self.timing_callback],
+            callbacks=[self.token_callback, self.timing_callback, TrajectoryCallback()],
         )
 
     def _structure_report(self, coa_text: str):
@@ -84,6 +86,7 @@ class COAOrchestrator:
             parsed = None
         return check_coa(parsed, coa_text)
 
+    @run_scope("COAOrchestrator")
     async def generate(
         self,
         mission_input: str,

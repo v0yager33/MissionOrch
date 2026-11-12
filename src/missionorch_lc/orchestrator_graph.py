@@ -71,6 +71,8 @@ from .core.settings import get_settings, resolve_path
 from .schemas.coa import COA, ExpectedOutcome
 from .schemas.result import COAResult
 from .tools.rag_tools import build_rag_tools
+from .trajectory.instrumentation import run_scope, stage_scope
+from .trajectory.langchain import TrajectoryCallback
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +222,7 @@ def _stop_reason(
 
 
 def _make_analyst_node(analyst: MissionAnalystAgent):
+    @stage_scope("Analyst")
     async def analyst_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         mission = state["mission_input"]
@@ -261,6 +264,7 @@ def _make_analyst_node(analyst: MissionAnalystAgent):
 def _make_researcher_node(
     researcher: KnowledgeResearcherAgent, rag_manager: RAGManager
 ):
+    @stage_scope("Researcher")
     async def researcher_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         if state.get("skip_research") or not rag_manager.is_enabled():
@@ -302,6 +306,7 @@ def _make_researcher_node(
 
 
 def _make_planner_node(planner: PlannerAgent):
+    @stage_scope("Planner")
     async def planner_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         mission = state["mission_input"]
@@ -369,6 +374,7 @@ def _make_planner_node(planner: PlannerAgent):
 
 
 def _make_judge_node(judge: JudgeAgent, parser: COATableParser):
+    @stage_scope("Judge")
     async def judge_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         coa_text = state["current_coa_text"]
@@ -494,6 +500,7 @@ def _make_judge_node(judge: JudgeAgent, parser: COATableParser):
 
 
 def _make_reflector_node(reflector: ReflectorAgent):
+    @stage_scope("Reflector")
     async def reflector_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         coa_text = state.get("revision_base") or state["current_coa_text"]
@@ -536,6 +543,7 @@ def _make_finalize_node(
     token_callback: TokenUsageCallback,
     timing_callback: StageTimingCallback,
 ):
+    @stage_scope("Validator")
     async def finalize_node(state: COAGraphState) -> Dict[str, Any]:
         started = time.perf_counter()
         coa_text = state.get("best_coa_text") or state.get("current_coa_text", "")
@@ -815,6 +823,7 @@ def _pick(value: Any, cfg: Dict[str, Any], key: str, default: Any, cast) -> Any:
     return cast(value if value is not None else cfg.get(key, default))
 
 
+@run_scope("COAGraph")
 async def run_graph(
     mission_input: str,
     *,
@@ -849,7 +858,7 @@ async def run_graph(
         rag_config_path=rag_config_path, use_rag=use_rag, profile=profile
     )
 
-    callbacks: List[Any] = [token_callback, timing_callback]
+    callbacks: List[Any] = [token_callback, timing_callback, TrajectoryCallback()]
     if extra_callbacks:
         callbacks.extend(extra_callbacks)
     max_iter = _pick(max_iterations, workflow, "max_iterations", 3, int)

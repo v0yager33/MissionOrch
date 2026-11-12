@@ -29,6 +29,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+missionorch_lc = ["prompts/trajectory_synthesis.txt"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

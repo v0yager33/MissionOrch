@@ -76,6 +76,8 @@ class AppSettings(BaseSettings):
     # 路径相关
     config_dir: Path = Field(default=Path("config"), description="YAML 配置目录")
     log_dir: Path = Field(default=Path("logs"), description="日志目录")
+    trajectory_enabled: bool = True
+    trajectory_dir: Path = PROJECT_ROOT / "data" / "trajectories"
 
     # YAML 文件路径
     agents_config: Path = Field(default=Path("config/agents.yaml"))
