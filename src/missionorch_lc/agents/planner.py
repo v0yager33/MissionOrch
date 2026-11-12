@@ -199,6 +199,12 @@ class PlannerAgent(BaseAgent):
         self.last_truncated = self.last_finish_reason == "length"
         if self.last_truncated:
             logger.warning("Planner output hit max_tokens (finish_reason=length)")
+        usage = getattr(message, "usage_metadata", None) or {}
+        reasoning = (usage.get("output_token_details") or {}).get("reasoning", 0)
+        logger.info(
+            f"Planner usage: in={usage.get('input_tokens')}, out={usage.get('output_tokens')}, "
+            f"reasoning={reasoning}, finish={self.last_finish_reason or '-'}"
+        )
 
         if not response or len(response.strip()) < 50:
             raise ValueError("COA generation returned empty/too-short response")

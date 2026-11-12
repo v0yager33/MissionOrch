@@ -4,7 +4,8 @@
 # 注意 prompt_file 路径相对项目根目录；新版 prompts 在 src/missionorch_lc/prompts/
 #
 # 提速思路（借鉴 nanobot 的模型分层）：
-#   - 只有 planner 真正需要思考模式（deepseek_v4_pro）；
+#   - planner 默认用 deepseek-v4-pro 的非思考模式（实测比 high 思考快 3 倍，评分无差异），
+#     quality 档才打开深度思考；
 #   - analyst / judge 是结构化抽取与打分，用非思考的 deepseek_chat 即可；
 #   - reflector 的职责并入 judge（revision_instructions），默认不再单独调用；
 #   - validator 默认走确定性检查（coa_checks），不再额外调用一次 LLM。
@@ -39,7 +40,7 @@ agents:
 
   # ── 3. 规划 ──
   planner:
-    model_id: deepseek_v4_pro
+    model_id: deepseek_v4_pro_nothink
     prompt_file: src/missionorch_lc/prompts/planner.txt
     temperature_override: 0.1
     use_rag: true                       # Planner 接收 Researcher 简报作为 knowledge
@@ -102,6 +103,7 @@ profiles:
   quality:
     agents:
       analyst: {model_id: deepseek_v4_pro}
+      planner: {model_id: deepseek_v4_pro}
       judge: {model_id: deepseek_v4_pro}
       reflector: {model_id: deepseek_v4_pro}
     workflow:

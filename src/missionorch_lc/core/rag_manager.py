@@ -17,24 +17,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .rag.lightrag_factory import build_rag_anything, ensure_initialized
-
 logger = logging.getLogger(__name__)
 
 
 # ── 检查 raganything 是否可用 ──
-try:
-    import raganything  # type: ignore  # noqa: F401
-
-    RAG_AVAILABLE = True
-except ImportError:
-    RAG_AVAILABLE = False
+# 只查 spec 不真正 import：raganything / lightrag 链路在 NAS 上要十几秒，
+# --no-rag 或 RAG 未启用时不应该付这个启动成本。启用时在 __init__ 里再加载。
+RAG_AVAILABLE = importlib.util.find_spec("raganything") is not None
+if not RAG_AVAILABLE:
     logger.warning(
         "RAG-Anything 未安装；RAG 功能将禁用。安装方法见 docs/RAG_GUIDE.md"
     )
@@ -66,6 +63,10 @@ class RAGManager:
         if not self.enabled:
             logger.info("RAGManager: 禁用（rag.enabled=False 或 RAG-Anything 未安装）")
             return
+
+        # lightrag_factory 在 import 时给 LightRAG 打朴素 RAG 补丁，
+        # 必须先于任何 raganything / LightRAG 实例化加载
+        from .rag import lightrag_factory  # noqa: F401
 
         # 立即构建所有 source 的引擎对象（懒初始化 LightRAG storage）
         sources = self.rag_cfg.get("knowledge_sources") or {}
@@ -182,6 +183,8 @@ class RAGManager:
                         key, caster.__name__, value,
                     )
 
+        from .rag.lightrag_factory import build_rag_anything
+
         return build_rag_anything(
             working_dir=str(source_working_dir),
             embedding_model_path=embedding_model_path,
@@ -207,6 +210,8 @@ class RAGManager:
         if engine is None:
             return None
         if not self._initialized.get(source_name, False):
+            from .rag.lightrag_factory import ensure_initialized
+
             try:
                 await ensure_initialized(engine)
                 self._initialized[source_name] = True

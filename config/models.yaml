@@ -71,6 +71,25 @@ models:
     # 可用 DEEPSEEK_REASONING_EFFORT=medium/low 进一步提速
     reasoning_effort: ${DEEPSEEK_REASONING_EFFORT:high}
 
+  # v4-pro 关闭思考：balanced 档 planner 默认用它。
+  # scenario_1_rich 实测（同一份 analyst 输出，单样本）：
+  #   high 思考 241s / medium 196s / low 109s / 不思考 70s，
+  #   judge 评分 7.2~7.4 无可测差异，结构检查全部通过；不思考版编队编号与任务一致。
+  # 需要深度思考时用 --profile quality（planner 回到 deepseek_v4_pro）。
+  deepseek_v4_pro_nothink:
+    provider: openai_compatible
+    api_key: ${DEEPSEEK_API_KEY}
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-pro
+    default_temperature: 0.3
+    timeout: 300
+    max_retries: 2
+    max_tokens: 16384
+    extra_body:
+      thinking:
+        type: disabled
+    fallback_model_ids: ["deepseek_chat"]
+
   # 兼容旧名（2026/07/24 弃用，自动指向 v4-flash 的非思考 / 思考模式）
   # 非思考模式，响应快，适合 analyst / judge 这类结构化抽取与打分任务
   deepseek_chat:

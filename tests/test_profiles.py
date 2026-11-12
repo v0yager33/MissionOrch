@@ -68,8 +68,18 @@ def test_real_agents_yaml_profiles():
     balanced = load_agents_config(profile="balanced")
     assert balanced["workflow"]["use_reflector"] is False
     assert balanced["workflow"]["revision_mode"] == "section_patch"
+    assert balanced["agents"]["planner"]["model_id"] == "deepseek_v4_pro_nothink"
     quality = load_agents_config(profile="quality")
     assert quality["workflow"]["use_reflector"] is True
+    assert quality["agents"]["planner"]["model_id"] == "deepseek_v4_pro"
+
+
+def test_planner_models_thinking_modes():
+    with open(resolve_path("config/models.yaml"), encoding="utf-8") as f:
+        models = (yaml.safe_load(f) or {}).get("models") or {}
+    assert models["deepseek_v4_pro_nothink"]["extra_body"]["thinking"]["type"] == "disabled"
+    assert "reasoning_effort" not in models["deepseek_v4_pro_nothink"]
+    assert models["deepseek_v4_pro"]["extra_body"]["thinking"]["type"] == "enabled"
 
 
 def test_all_model_ids_exist():
