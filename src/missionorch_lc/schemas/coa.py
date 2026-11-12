@@ -1,7 +1,7 @@
 """COA 数据模型 —— 作战单元(Unit) × 阶段(Phase) 的二维矩阵。"""
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +52,37 @@ class DecisionPoint(BaseModel):
     options: List[Dict[str, str]] = Field(default_factory=list)
 
 
+class ExpectedOutcome(BaseModel):
+    """预期战果（Expected Outcome / MOE）。
+
+    只记录、透传，不参与评分与流程决策。预留给后续"想定脚本 → 仿真 → 实测比对 → 战报"：
+    仿真结束后回填 ``actual_value`` 与 ``status``，即可逐条比对方案的预期与实际效果。
+    """
+
+    outcome_id: str = Field(default="EO-1", description="战果标识，如 EO-1")
+    description: str = Field(default="", description="预期战果描述")
+    metric: str = Field(default="", description="衡量指标，如 击落敌机数量")
+    comparator: str = Field(
+        default="", description="比较符：>= <= == > < ≈ range；空表示定性目标"
+    )
+    target_value: str = Field(default="", description="目标值，如 6 或 6-8")
+    unit: str = Field(default="", description="单位，如 架 / % / 分钟")
+    side: str = Field(default="", description="统计对象所属方：BLUE / RED / NEUTRAL")
+    phase_id: str = Field(default="", description="关联阶段")
+    priority: str = Field(default="", description="优先级：高/中/低")
+    linked_effects: List[str] = Field(default_factory=list, description="关联效果ID")
+    observable: str = Field(default="", description="仿真中可统计的观测量")
+    source: str = Field(
+        default="", description="来源：user / mission_input / analyst / planner"
+    )
+
+    # ── 预留：仿真回填，当前流程不写入 ──
+    actual_value: Optional[str] = Field(default=None, description="仿真实测值（预留）")
+    status: str = Field(
+        default="PENDING", description="比对结论（预留）：PENDING / MET / PARTIAL / NOT_MET"
+    )
+
+
 class COA(BaseModel):
     """Course of Action —— 战役级行动方案。"""
 
@@ -68,6 +99,7 @@ class COA(BaseModel):
     effects_chain: List[Effect] = Field(default_factory=list)
     decision_points: List[DecisionPoint] = Field(default_factory=list)
     critical_risks: List[Dict[str, str]] = Field(default_factory=list)
+    expected_outcomes: List[ExpectedOutcome] = Field(default_factory=list)
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

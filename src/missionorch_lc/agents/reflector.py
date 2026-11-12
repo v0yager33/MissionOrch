@@ -20,8 +20,8 @@ class ReflectorAgent(BaseAgent):
     # reflector.txt 的占位符白名单
     prompt_variables = ("coa_table", "judge_feedback", "iteration")
 
-    def __init__(self) -> None:
-        super().__init__("reflector")
+    def __init__(self, profile: Optional[str] = None) -> None:
+        super().__init__("reflector", profile=profile)
         self.use_reasoning = bool(self.agent_cfg.get("use_reasoning_chain", False))
         self.output_parser = StrOutputParser()
         logger.info(f"ReflectorAgent initialized (use_reasoning={self.use_reasoning})")

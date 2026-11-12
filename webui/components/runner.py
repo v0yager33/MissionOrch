@@ -8,6 +8,10 @@
 为什么不直接 ``asyncio.run(run_graph(...))``？
 Streamlit 的脚本执行模型本身就是阻塞的，但在阻塞期间页面什么也画不出来；
 我们用 ``threading + queue`` 让它在后台跑，主线程靠 ``st.empty()`` 轮询渲染。
+
+所有运行共用一个常驻 event loop（守护线程里 ``run_forever``）：
+``orchestrator_graph`` 的 Agent / RAG 缓存以及底层 HTTP 连接池都绑定在 loop 上，
+每次新建再关闭 loop 会让缓存失效、连接重建，常驻 loop 下第二次起运行明显更快。
 """
 
 from __future__ import annotations
@@ -32,6 +36,25 @@ STAGE_LABELS: Dict[str, str] = {
     "reflector": "5️⃣ Reflector — 反思改进",
     "finalize": "6️⃣ Finalize — 解析 / 验证 / 格式化",
 }
+
+
+# ── 常驻 event loop ──
+
+_LOOP_LOCK = threading.Lock()
+_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _background_loop() -> asyncio.AbstractEventLoop:
+    """返回进程内共享的后台 event loop，首次调用时在守护线程中启动。"""
+    global _LOOP
+    with _LOOP_LOCK:
+        if _LOOP is None or _LOOP.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(
+                target=loop.run_forever, daemon=True, name="missionorch-loop"
+            ).start()
+            _LOOP = loop
+        return _LOOP
 
 
 @dataclass
@@ -68,6 +91,8 @@ def start_run(
     max_iterations: int,
     quality_threshold: float,
     rag_config_path: str = "config/rag.yaml",
+    expected_outcomes: Any = None,
+    profile: Optional[str] = None,
 ) -> RunHandle:
     """启动一次后端运行（在后台线程里跑）。
 
@@ -77,6 +102,8 @@ def start_run(
         legacy: True 走经典 4-Agent，False 走 6-Agent LangGraph
         max_iterations: 规划最大迭代次数
         quality_threshold: Judge 质量阈值
+        expected_outcomes: 预期战果（str / dict / 列表），只透传到输出，不参与评分
+        profile: 运行档位（fast / balanced / quality），None 时读默认配置
 
     Returns:
         ``RunHandle``，主线程可以轮询 ``poll_logs()`` / ``finished`` / ``result``
@@ -94,17 +121,18 @@ def start_run(
         if legacy:
             from missionorch_lc.orchestrator import COAOrchestrator
 
-            orch = COAOrchestrator()
+            orch = COAOrchestrator(profile=profile)
             orch.max_iter = max_iterations
             orch.threshold = quality_threshold
             _push("info", message=f"经典模式 max_iter={max_iterations}, threshold={quality_threshold}")
-            return await orch.generate(mission)
+            return await orch.generate(mission, expected_outcomes=expected_outcomes)
 
         _push(
             "info",
             message=(
                 f"LangGraph 6-Agent | max_iter={max_iterations}, "
                 f"threshold={quality_threshold}, rag={'on' if use_rag else 'off'}"
+                + (f", profile={profile}" if profile else "")
             ),
         )
 
@@ -118,17 +146,15 @@ def start_run(
             max_iterations=max_iterations,
             quality_threshold=quality_threshold,
             extra_callbacks=[callback],
+            expected_outcomes=expected_outcomes,
+            profile=profile,
         )
 
     def _thread_target() -> None:
         try:
             _push("start", mission=mission)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(_runner_async())
-            finally:
-                loop.close()
+            future = asyncio.run_coroutine_threadsafe(_runner_async(), _background_loop())
+            result = future.result()
 
             handle.result = result
             handle.stage_log = list(result.get("stage_log") or [])

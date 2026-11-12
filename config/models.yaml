@@ -40,37 +40,48 @@ models:
   # ── DeepSeek 系列（OpenAI 兼容协议）──
   # v4 系列：deepseek-v4-flash（轻量）/ deepseek-v4-pro（旗舰，支持思考模式）
   # 旧版 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
+  #
+  # 重试策略（借鉴 nanobot）：max_retries 是 SDK 级重试，只对超时/限流/5xx 生效，
+  # 4xx 直接抛出；不再叠加 LangChain with_retry（需要时加 outer_retry: true）。
+  # 思考模式下 reasoning_content 与正文共用 max_tokens，设得太小会把 COA 截断。
   deepseek_v4_flash:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-v4-flash
     default_temperature: 0.3
-    timeout: 120
-    max_retries: 3
+    timeout: 180
+    max_retries: 2
+    max_tokens: 16384
     fallback_model_ids: ["deepseek_v4_pro"]
 
   deepseek_v4_pro:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-v4-pro
     default_temperature: 0.3
-    timeout: 180
-    max_retries: 3
+    timeout: 600
+    max_retries: 2
+    max_tokens: 32768
     # 通过 extra_body 开启思考模式（仅 deepseek-v4-pro 支持）
     extra_body:
       thinking:
         type: enabled
-    reasoning_effort: high
+    # 可用 DEEPSEEK_REASONING_EFFORT=medium/low 进一步提速
+    reasoning_effort: ${DEEPSEEK_REASONING_EFFORT:high}
 
   # 兼容旧名（2026/07/24 弃用，自动指向 v4-flash 的非思考 / 思考模式）
+  # 非思考模式，响应快，适合 analyst / judge 这类结构化抽取与打分任务
   deepseek_chat:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-chat
     default_temperature: 0.3
+    timeout: 180
+    max_retries: 2
+    max_tokens: 16384
 
   # ReAct / 多轮 tool-calling 专用 Alias —— 关键：新名 deepseek-v4-flash
   # 会在响应里带 reasoning_content，下一轮必须原样回传，否则报 400
@@ -83,18 +94,19 @@ models:
   #        打 deepseek-chat 返回 ['role','content']，与 OpenAI 协议完全一致。
   deepseek_chat_safe:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-chat
     default_temperature: 0.3
     timeout: 120
-    max_retries: 3
+    max_retries: 2
+    max_tokens: 8192
     # 注意：不配 fallback_model_ids —— 一旦 fallback 到 v4-flash/v4-pro 就会
     # 重新引入 reasoning_content 问题。宁可失败也不要隐式切换。
 
   deepseek_reasoner:
     provider: openai_compatible
-    api_key: ${DEEPSEEK_API_KEY:sk-964574d71e9649d49e80a54828f3d955}
+    api_key: ${DEEPSEEK_API_KEY}
     base_url: https://api.deepseek.com
     model: deepseek-reasoner
     default_temperature: 0.6

@@ -2,13 +2,20 @@
 # Agent 角色配置 —— 6 个 Agent 的完整流水线
 # 引用 config/models.yaml 中定义的 model_id
 # 注意 prompt_file 路径相对项目根目录；新版 prompts 在 src/missionorch_lc/prompts/
+#
+# 提速思路（借鉴 nanobot 的模型分层）：
+#   - 只有 planner 真正需要思考模式（deepseek_v4_pro）；
+#   - analyst / judge 是结构化抽取与打分，用非思考的 deepseek_chat 即可；
+#   - reflector 的职责并入 judge（revision_instructions），默认不再单独调用；
+#   - validator 默认走确定性检查（coa_checks），不再额外调用一次 LLM。
+# 下方 profiles 可整体切换：--profile fast / balanced / quality，
+# 或环境变量 MISSIONORCH_PROFILE。
 # ============================================================================
 
 agents:
   # ── 1. 任务分析 ──
-  # 全部用 deepseek_v4_pro（支持思考模式，reasoning_effort=high）
   analyst:
-    model_id: deepseek_v4_pro
+    model_id: deepseek_chat
     prompt_file: src/missionorch_lc/prompts/analyst.txt
     temperature_override: 0.0           # 结构化输出需要确定性
     use_rag: false
@@ -28,7 +35,7 @@ agents:
     prompt_file: src/missionorch_lc/prompts/researcher.txt
     temperature_override: 0.2
     use_rag: true
-    max_tool_calls: 6                   # ReAct 工具调用硬上限
+    max_tool_calls: 4                   # ReAct 工具调用硬上限
 
   # ── 3. 规划 ──
   planner:
@@ -40,7 +47,7 @@ agents:
 
   # ── 4. 评估 ──
   judge:
-    model_id: deepseek_v4_pro
+    model_id: deepseek_chat
     prompt_file: src/missionorch_lc/prompts/judge.txt
     use_rag: false
     criteria:
@@ -50,19 +57,20 @@ agents:
       - synchronization
       - resource_efficiency
 
-  # ── 5. 反思 ──
+  # ── 5. 反思（workflow.use_reflector=true 时才调用）──
   reflector:
-    model_id: deepseek_v4_pro
+    model_id: deepseek_chat
     prompt_file: src/missionorch_lc/prompts/reflector.txt
     use_rag: false
     use_reasoning_chain: true
 
   # ── 6. 验证 ──
   validator:
-    model_id: deepseek_v4_pro
+    model_id: deepseek_chat
     prompt_file: src/missionorch_lc/prompts/validator.txt
     temperature_override: 0.0
     use_rag: false
+    use_llm: false                      # false = 确定性检查（秒级）；true = 额外一次 LLM 验证
     validation_rules:
       - format_compliance
       - logical_consistency
@@ -71,6 +79,32 @@ agents:
 
 # ── 主循环控制 ──
 workflow:
-  max_iterations: 3                     # plan→judge→reflect 循环最大次数
+  max_iterations: 3                     # plan→judge 循环最大次数
   quality_threshold: 8.0                # 达到此分数 early stop
   early_stop: true
+  use_reflector: false                  # false = 直接用 judge 的 revision_instructions
+  min_improvement: 0.2                  # 分数提升小于该值视为进入平台期
+  patience: 1                           # 平台期持续轮数达到后提前结束
+  revision_mode: section_patch          # section_patch = 只重写需要修改的章节；full = 每轮全文重写
+  use_analyst: true                     # false = 只做规则抽取，省一次 LLM 调用
+  default_profile: balanced
+
+# ── 运行档位（覆盖 agents / workflow 中的同名字段）──
+profiles:
+  fast:
+    agents:
+      planner: {model_id: deepseek_chat}
+    workflow:
+      max_iterations: 2
+      quality_threshold: 7.5
+      use_analyst: false
+  balanced: {}
+  quality:
+    agents:
+      analyst: {model_id: deepseek_v4_pro}
+      judge: {model_id: deepseek_v4_pro}
+      reflector: {model_id: deepseek_v4_pro}
+    workflow:
+      max_iterations: 3
+      use_reflector: true
+      revision_mode: full

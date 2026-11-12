@@ -17,6 +17,21 @@ from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 项目根目录（src/missionorch_lc/core/settings.py → parents[3]）
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def resolve_path(path: str | Path) -> Path:
+    """把相对路径解析到项目根目录，使 CLI 不依赖当前工作目录。
+
+    顺序：绝对路径 / 相对当前目录已存在 → 原样返回；否则尝试项目根目录。
+    """
+    p = Path(path).expanduser()
+    if p.is_absolute() or p.exists():
+        return p
+    candidate = PROJECT_ROOT / p
+    return candidate if candidate.exists() else p
+
 
 class WorkflowSettings(BaseSettings):
     """迭代循环相关参数。"""

@@ -1,7 +1,10 @@
 """Mission Analyst Agent —— 任务结构化分析。
 
 输出严格 JSON（含 mission_intent / objectives / key_entities / constraints /
-uncertainties / research_queries），为 Researcher 与 Planner 提供基础。
+uncertainties / research_queries / expected_outcomes），为 Researcher 与 Planner 提供基础。
+
+预期战果先用规则从任务文本的"## 预期战果"等段落里确定性抽取，再合并 LLM 抽到的条目；
+LLM 调用失败时规则抽取的结果仍然保留。
 """
 
 from __future__ import annotations
@@ -14,9 +17,17 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable, RunnableConfig
 
+from ..core.expected_outcomes import coerce_outcomes, extract_from_mission, merge_outcomes
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _text(value: Any) -> str:
+    """列表条目 → 文本；dict 取 name / description。"""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("description") or json.dumps(value, ensure_ascii=False)
+    return str(value).strip() if value is not None else ""
 
 
 class MissionAnalystAgent(BaseAgent):
@@ -24,8 +35,8 @@ class MissionAnalystAgent(BaseAgent):
 
     prompt_variables = ("mission_input",)
 
-    def __init__(self) -> None:
-        super().__init__("analyst")
+    def __init__(self, profile: Optional[str] = None) -> None:
+        super().__init__("analyst", profile=profile)
         self._chain: Optional[Runnable] = None
         logger.info("MissionAnalystAgent initialized")
 
@@ -63,13 +74,14 @@ class MissionAnalystAgent(BaseAgent):
             logger.error(f"Analyst failed: {analyze_error}", exc_info=True)
             result = self._fallback_analysis(mission_input, str(analyze_error))
 
-        # 强制保证关键字段存在
-        result.setdefault("mission_intent", mission_input[:120])
-        result.setdefault("objectives", [])
-        result.setdefault("key_entities", {})
-        result.setdefault("constraints", [])
-        result.setdefault("uncertainties", [])
-        result.setdefault("research_queries", [])
+        # 强制保证关键字段存在且类型正确（LLM 可能给 null / 字符串列表）
+        self._normalize(result, mission_input)
+        # 规则抽取优先（数值精确），LLM 只补充规则没抽到的条目
+        result["expected_outcomes"] = merge_outcomes(
+            extract_from_mission(mission_input),
+            coerce_outcomes(result.get("expected_outcomes"), source="analyst"),
+            keep_primary_source=True,
+        )
 
         self.log_interaction(
             "analyze",
@@ -82,6 +94,43 @@ class MissionAnalystAgent(BaseAgent):
             f"{len(result.get('research_queries', []))} research queries"
         )
         return result
+
+    @staticmethod
+    def _normalize(result: Dict[str, Any], mission_input: str) -> None:
+        """就地修正字段类型，下游（transformer / memory / webui）可以直接 .get()。"""
+        if not result.get("mission_intent"):
+            result["mission_intent"] = mission_input[:120]
+        for key in ("constraints", "uncertainties", "research_queries"):
+            value = result.get(key)
+            if isinstance(value, str):
+                value = [value]
+            result[key] = [_text(v) for v in (value or []) if _text(v)]
+
+        objectives = []
+        raw_objectives = result.get("objectives") or []
+        if isinstance(raw_objectives, (str, dict)):
+            raw_objectives = [raw_objectives]
+        for idx, obj in enumerate(raw_objectives, start=1):
+            if isinstance(obj, dict):
+                obj.setdefault("id", f"OBJ-{idx}")
+                obj.setdefault("priority", "")
+                obj.setdefault("description", "")
+                objectives.append(obj)
+            elif str(obj).strip():
+                objectives.append({"id": f"OBJ-{idx}", "priority": "", "description": str(obj)})
+        result["objectives"] = objectives
+
+        entities = result.get("key_entities")
+        if not isinstance(entities, dict):
+            entities = {}
+        for key, value in list(entities.items()):
+            if isinstance(value, str):
+                entities[key] = [value]
+            elif isinstance(value, list):
+                entities[key] = [_text(v) for v in value if _text(v)]
+            else:
+                entities[key] = []
+        result["key_entities"] = entities
 
     @staticmethod
     def _fallback_analysis(mission_input: str, error: str) -> Dict[str, Any]:

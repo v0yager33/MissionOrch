@@ -9,12 +9,15 @@
 
 所有模型实例：
   - 单例缓存（按 model_id）
-  - 自动包裹 `.with_retry(...)`：指数退避 + 多次重试
+  - 重试下沉到 SDK 层（OpenAI/Anthropic SDK 只对 408/409/429/5xx/连接错误重试，
+    4xx 参数错误立即抛出），避免「SDK 重试 × LangChain with_retry」叠乘拖慢失败路径
+  - 可选 `.with_retry(...)`：仅当 YAML 中 `outer_retry: true` 时启用
   - 可选 `.with_fallbacks([...])`：在主模型失败时降级到备用模型
   - 支持 YAML 中 `${ENV_VAR}` / `${ENV_VAR:default}` 的环境变量占位语法
 
 在模型 YAML 中新增的可选字段：
-  max_retries: int  (默认 3)
+  max_retries: int  (SDK 级重试次数，默认 2)
+  outer_retry: bool (是否再套 LangChain with_retry，默认 false)
   fallback_model_ids: list[str]  (按顺序依次降级)
 """
 
@@ -22,15 +25,49 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import yaml
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import Runnable
 
 logger = logging.getLogger(__name__)
+
+_ENV_RE = re.compile(r"\$\{([^}:]+)(?::([^}]*))?\}")
+
+
+def _default_models_config() -> str:
+    from .settings import get_settings, resolve_path
+
+    return str(resolve_path(get_settings().models_config))
+
+
+def _retryable_exceptions() -> tuple:
+    """可重试的异常类型：超时 / 连接 / 限流 / 5xx。参数类 4xx 不重试。"""
+    types: List[type] = [TimeoutError, ConnectionError]
+    try:
+        import openai
+
+        types.extend(
+            [
+                openai.APITimeoutError,
+                openai.APIConnectionError,
+                openai.RateLimitError,
+                openai.InternalServerError,
+            ]
+        )
+    except Exception:  # pragma: no cover - openai 未安装
+        pass
+    try:
+        import httpx
+
+        types.extend([httpx.TimeoutException, httpx.TransportError])
+    except Exception:  # pragma: no cover
+        pass
+    return tuple(types)
 
 
 class ModelRouterError(Exception):
@@ -60,7 +97,7 @@ class ModelRouter:
     def get(
         cls,
         model_id: str,
-        config_path: str = "config/models.yaml",
+        config_path: Optional[str] = None,
         *,
         wrapped: bool = True,
     ) -> BaseChatModel:
@@ -68,11 +105,12 @@ class ModelRouter:
 
         Args:
             model_id: 模型标识
-            config_path: YAML 配置路径
+            config_path: YAML 配置路径（默认取 settings.models_config，按项目根目录解析）
             wrapped: 是否返回带重试/降级包装的 Runnable
                 - True（默认）：适合直接用于业务（大多数场景）
                 - False：返回原始 ChatModel，便于调用 `bind`/`bind_tools`/`with_structured_output` 等需要具体类型的方法
         """
+        config_path = config_path or _default_models_config()
         cache = cls._wrapped_instances if wrapped else cls._raw_instances
         if model_id in cache:
             return cache[model_id]  # type: ignore[return-value]
@@ -112,16 +150,17 @@ class ModelRouter:
         cls,
         runnable: Runnable,
         model_id: str,
-        config_path: str = "config/models.yaml",
+        config_path: Optional[str] = None,
     ) -> Runnable:
-        """按 `model_id` 的 YAML 配置给任意 Runnable 套上 with_retry + with_fallbacks。
+        """按 `model_id` 的 YAML 配置给任意 Runnable 套上（可选的）with_retry + with_fallbacks。
 
         Args:
             runnable: 任意 LangChain Runnable（常见：`raw_model.bind(...)`、`raw_model.bind_tools(...)`、
                 `raw_model.with_structured_output(...)` 的结果）。
-            model_id: 用于读取 `max_retries` / `fallback_model_ids` 的模型 ID。
+            model_id: 用于读取 `outer_retry` / `fallback_model_ids` 的模型 ID。
             config_path: models.yaml 路径。
         """
+        config_path = config_path or _default_models_config()
         try:
             cfg = cls._load_config_cached(config_path)["models"][model_id]
         except KeyError as cfg_error:
@@ -141,16 +180,20 @@ class ModelRouter:
         *,
         exclude_model_id: str,
     ) -> Runnable:
-        """给 Runnable 套一层 with_retry（+ with_fallbacks 如果配置了）。"""
-        max_retries = int(cfg.get("max_retries", 3))
+        """给 Runnable 套一层（可选的）with_retry，再套 with_fallbacks（如果配置了）。
 
+        SDK 已经按 `max_retries` 对可重试错误做了指数退避；外层 with_retry 默认关闭，
+        开启后也只对超时/连接/限流/5xx 重试，不再对所有 Exception 盲重试。
+        """
         wrapped: Runnable = model
-        if max_retries > 0:
-            wrapped = wrapped.with_retry(
-                stop_after_attempt=max_retries,
-                wait_exponential_jitter=True,
-                retry_if_exception_type=(Exception,),
-            )
+        if cfg.get("outer_retry"):
+            attempts = int(cfg.get("outer_retry_attempts", 2))
+            if attempts > 1:
+                wrapped = wrapped.with_retry(
+                    stop_after_attempt=attempts,
+                    wait_exponential_jitter=True,
+                    retry_if_exception_type=_retryable_exceptions(),
+                )
 
         fallback_ids: List[str] = list(cfg.get("fallback_model_ids") or [])
         fallback_ids = [m for m in fallback_ids if m != exclude_model_id]
@@ -161,14 +204,7 @@ class ModelRouter:
                     fb_cfg = cls._load_config_cached(config_path)["models"][fb_id]
                     fb_raw = cls._raw_instances.get(fb_id) or cls._create_chat_model(fb_cfg)
                     cls._raw_instances[fb_id] = fb_raw
-                    fb_max_retries = int(fb_cfg.get("max_retries", 2))
-                    fb_runnable: Runnable = fb_raw
-                    if fb_max_retries > 0:
-                        fb_runnable = fb_runnable.with_retry(
-                            stop_after_attempt=fb_max_retries,
-                            wait_exponential_jitter=True,
-                        )
-                    fallbacks.append(fb_runnable)
+                    fallbacks.append(fb_raw)
                     logger.info(f"Registered fallback model: {fb_id}")
                 except Exception as fb_error:
                     logger.warning(f"Skip fallback '{fb_id}': {fb_error}")
@@ -177,9 +213,19 @@ class ModelRouter:
         return wrapped
 
     @classmethod
-    def get_raw(cls, model_id: str, config_path: str = "config/models.yaml") -> BaseChatModel:
+    def get_raw(cls, model_id: str, config_path: Optional[str] = None) -> BaseChatModel:
         """返回原始 ChatModel（未包装），用于 bind/bind_tools/with_structured_output。"""
         return cls.get(model_id, config_path=config_path, wrapped=False)  # type: ignore[return-value]
+
+    @classmethod
+    def get_config(cls, model_id: str, config_path: Optional[str] = None) -> Dict[str, Any]:
+        """返回模型的 YAML 配置（已展开环境变量）；不存在时返回空 dict。"""
+        try:
+            return dict(
+                cls._load_config_cached(config_path or _default_models_config())["models"][model_id]
+            )
+        except Exception:
+            return {}
 
     # ── ChatModel 构造 ──
     @staticmethod
@@ -190,8 +236,9 @@ class ModelRouter:
 
         model = cfg["model"]
         temperature = cfg.get("default_temperature", 0.7)
-        max_tokens = cfg.get("max_tokens", 4096)
+        max_tokens = int(cfg.get("max_tokens", 4096))
         timeout = cfg.get("timeout", 120)
+        sdk_retries = int(cfg.get("max_retries", 2))
 
         if provider == "openai":
             from langchain_openai import ChatOpenAI
@@ -203,7 +250,7 @@ class ModelRouter:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                max_retries=3,
+                max_retries=sdk_retries,
             )
 
         if provider in ("openai_compatible", "doubao"):
@@ -223,7 +270,7 @@ class ModelRouter:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                max_retries=3,
+                max_retries=sdk_retries,
             )
             extra_body = cfg.get("extra_body")
             if extra_body:
@@ -242,7 +289,7 @@ class ModelRouter:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
-                max_retries=3,
+                max_retries=sdk_retries,
             )
 
         if provider == "gemini":
@@ -293,19 +340,20 @@ class ModelRouter:
 
     @staticmethod
     def _expand_env_vars(obj: Any) -> Any:
-        """递归展开 `${VAR}` 与 `${VAR:default}` 占位符。"""
+        """递归展开 `${VAR}` 与 `${VAR:default}` 占位符（支持嵌在字符串中间）。"""
         if isinstance(obj, dict):
             return {k: ModelRouter._expand_env_vars(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [ModelRouter._expand_env_vars(v) for v in obj]
-        if isinstance(obj, str) and obj.startswith("${") and obj.endswith("}"):
-            expr = obj[2:-1]
-            if ":" in expr:
-                name, default = expr.split(":", 1)
-                return os.getenv(name.strip(), default)
-            name = expr.strip()
-            value = os.getenv(name)
-            if value is None:
-                logger.warning(f"环境变量未设置: {name}")
-            return value
+        if isinstance(obj, str) and "${" in obj:
+            full = _ENV_RE.fullmatch(obj)
+            if full:
+                name, default = full.group(1).strip(), full.group(2)
+                value = os.getenv(name)
+                if value is None and default is None:
+                    logger.warning(f"环境变量未设置: {name}")
+                return value if value is not None else default
+            return _ENV_RE.sub(
+                lambda m: os.getenv(m.group(1).strip(), m.group(2) or ""), obj
+            )
         return obj

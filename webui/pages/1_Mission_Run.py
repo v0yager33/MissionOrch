@@ -53,7 +53,19 @@ DEFAULT_MISSION = """## 任务
 ## 期望产出
 - 一份完整 COA 方案，至少 4 个阶段
 - 重点覆盖：电磁压制 → 制空 → 打击 → 安全返航
+
+## 预期战果
+- 摧毁或压制 S-400 SAM 阵地 ≥ 2 个
+- 击落 J-16 拦截机 ≥ 4 架
+- 我方飞机损失 ≤ 1 架
 """
+
+PROFILE_OPTIONS = {
+    "默认（读配置）": None,
+    "fast — 最快": "fast",
+    "balanced — 均衡": "balanced",
+    "quality — 质量优先": "quality",
+}
 
 
 with st.expander("📋 推荐输入格式说明（点击展开）"):
@@ -71,6 +83,7 @@ with st.expander("📋 推荐输入格式说明（点击展开）"):
 | `## 时间约束` | `## 时间` `## 时限` | 任务窗口 / 拂晓 / 截止时间 |
 | `## 其他约束` | `## 约束` `## 限制条件` | 政治 / 法律 / 通信 / 弹药等硬约束 |
 | `## 期望产出` | `## 期望` `## 输出要求` | 想要几阶段 / 重点关注什么 |
+| `## 预期战果` | `## 预期效果` `## 预计目标` `## 作战指标` | 可量化的期望效果，如"击落敌机 ≥ 4 架"；只透传到输出，不参与评分 |
 
 > **提示**：写得越具体、坐标 / 平台型号 / 距离越完整，生成的 COA 越对 AFSIM 仿真友好。
 """
@@ -84,14 +97,23 @@ with st.form("mission_form", border=True):
         help="可以是中文或英文，可分段写也可纯自由文本。Analyst 会自动抽取意图 / 实体 / 地理锚点。",
     )
 
-    col1, col2, col3, col4 = st.columns(4)
+    expect_text = st.text_area(
+        "额外预期战果（可选，每行一条）",
+        value="",
+        height=80,
+        help="与任务文本中的『## 预期战果』段合并；只记录到输出，不参与评分，留给后续仿真比对。",
+    )
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         max_iter = st.number_input("最大迭代", 1, 10, 3)
     with col2:
         threshold = st.slider("质量阈值", 0.0, 10.0, 8.0, step=0.5)
     with col3:
-        use_rag = st.checkbox("启用 RAG", value=True, help="关闭后 Researcher 节点降级")
+        profile_label = st.selectbox("运行档位", list(PROFILE_OPTIONS), index=0)
     with col4:
+        use_rag = st.checkbox("启用 RAG", value=True, help="关闭后 Researcher 节点降级")
+    with col5:
         legacy = st.checkbox("经典 4-Agent", value=False, help="退回旧版 Orchestrator")
 
     submitted = st.form_submit_button("🚀 开始执行", type="primary", use_container_width=True)
@@ -108,6 +130,10 @@ if submitted:
             "legacy": legacy,
             "max_iterations": int(max_iter),
             "quality_threshold": float(threshold),
+            "expected_outcomes": [
+                line.strip(" -*\t") for line in expect_text.splitlines() if line.strip(" -*\t")
+            ] or None,
+            "profile": PROFILE_OPTIONS[profile_label],
         }
         handle = start_run(**params)
         st.session_state["_active_run_handle"] = handle
@@ -152,8 +178,12 @@ def _render_stage_timeline(stage_log: List[Dict]) -> None:
                     "score",
                     "verdict",
                     "coa_len",
+                    "structure_issues",
                     "parse_success",
                     "is_valid",
+                    "expected_outcomes",
+                    "stop_reason",
+                    "elapsed",
                 ):
                     if key in last:
                         meta_lines.append(f"- **{key}**: {last[key]}")

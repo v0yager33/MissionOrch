@@ -26,3 +26,7 @@ class JudgeResult(BaseModel):
     feedback: str = Field(default="", description="详细反馈")
     critical_issues: List[str] = Field(default_factory=list, description="关键问题")
     improvement_suggestions: List[str] = Field(default_factory=list, description="改进建议")
+    revision_instructions: List[str] = Field(
+        default_factory=list,
+        description="给 Planner 的可直接执行的修订指令（替代独立的 Reflector 调用）",
+    )

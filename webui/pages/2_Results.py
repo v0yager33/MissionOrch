@@ -39,14 +39,38 @@ with st.expander("📌 本次任务输入", expanded=False):
 render_kv_grid(
     {
         "迭代次数": result.get("iterations", 0),
-        "最终得分": round(float(result.get("final_score", 0)), 2),
-        "最佳得分": round(float(result.get("best_score", 0)), 2),
+        "采用版本得分": round(float(result.get("final_score", 0)), 2),
+        "采用轮次": result.get("best_iteration") or "—",
+        "停止原因": result.get("stop_reason") or "—",
+        "总耗时": f"{float(result.get('elapsed_seconds') or 0):.1f}s",
         "解析": "✅" if result.get("parse_success") else "❌",
         "RAG": "启用" if result.get("rag_enabled") else "未启用",
         "RAG sources": ", ".join(result.get("rag_sources") or []) or "—",
     },
-    columns=6,
+    columns=4,
 )
+
+# 预期战果：只展示、不参与评分；actual_value / status 留给后续仿真回填
+outcomes = result.get("expected_outcomes") or []
+if outcomes:
+    with st.expander(f"🎯 预期战果（{len(outcomes)} 条，待仿真回填）", expanded=True):
+        st.dataframe(
+            [
+                {
+                    "ID": o.get("outcome_id"),
+                    "描述": o.get("description", ""),
+                    "指标": o.get("metric", ""),
+                    "目标": f"{o.get('comparator', '')} {o.get('target_value', '')} {o.get('unit', '')}".strip(),
+                    "阶段": o.get("phase_id", ""),
+                    "来源": o.get("source", ""),
+                    "实测": o.get("actual_value") or "",
+                    "状态": o.get("status", ""),
+                }
+                for o in outcomes
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
 
 # ── 6 个分区 Tab ──
 tabs = st.tabs(

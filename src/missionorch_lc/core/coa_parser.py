@@ -4,7 +4,8 @@ import logging
 import re
 from typing import Dict, List, Optional
 
-from ..schemas.coa import COA, Action, DecisionPoint, Effect, Phase, Unit
+from ..schemas.coa import COA, Action, DecisionPoint, Effect, ExpectedOutcome, Phase, Unit
+from .expected_outcomes import table_rows_to_outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,13 @@ class COATableParser:
         coa.effects_chain = self._parse_effects_chain(sections)
         coa.decision_points = self._parse_decision_points(sections)
         coa.critical_risks = self._parse_critical_risks(sections)
+        coa.expected_outcomes = self._parse_expected_outcomes(sections)
 
         logger.info(
-            "Parsed COA: %d phases, %d units, %d matrix cells, %d effects, %d decision points",
+            "Parsed COA: %d phases, %d units, %d matrix cells, %d effects, %d decision points, "
+            "%d expected outcomes",
             len(coa.phases), len(coa.units), len(coa.matrix),
-            len(coa.effects_chain), len(coa.decision_points),
+            len(coa.effects_chain), len(coa.decision_points), len(coa.expected_outcomes),
         )
         return coa
 
@@ -173,7 +176,7 @@ class COATableParser:
         role_match = re.search(r"\*\(\s*(.+?)\s*\)\*", cell_clean)
         role = role_match.group(1).strip() if role_match else ""
 
-        unit_id_match = re.search(r"[（(]\s*([A-Za-z0-9\-/]+)\s*[）)]", unit_name)
+        unit_id_match = re.search(r"[（(]\s*([A-Za-z0-9_\-/]+)\s*[）)]", unit_name)
         if unit_id_match:
             unit_id = unit_id_match.group(1).replace("/", "_").replace("-", "_")
         else:
@@ -218,7 +221,7 @@ class COATableParser:
                     self._get_cell(row, "衡量指标", "measures", "指标")
                 ),
                 achieved_by=self._split_list_value(
-                    self._get_cell(row, "达成单元", "达成任务", "achieved_by", "单元")
+                    self._get_cell(row, "达成单元", "达成实体", "达成任务", "achieved_by", "单元", "实体")
                 ),
             ))
         return effects
@@ -259,6 +262,17 @@ class COATableParser:
                 "mitigation": self._get_cell(row, "缓解措施", "mitigation", "措施") or "",
             })
         return risks
+
+    def _parse_expected_outcomes(self, sections: Dict[str, str]) -> List[ExpectedOutcome]:
+        """第八节"预期战果"：只记录，不参与评分。"""
+        content = self._find_section(sections, "预期战果", "expected outcome", "预期效果")
+        if not content:
+            return []
+        rows = self._parse_markdown_table(content)
+        return [
+            ExpectedOutcome(**item)
+            for item in table_rows_to_outcomes(rows, source="planner")
+        ]
 
     # ── Markdown 表格工具 ──
     def _parse_markdown_table(self, text: str) -> List[Dict[str, str]]:

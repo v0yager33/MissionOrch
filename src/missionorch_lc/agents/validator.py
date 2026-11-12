@@ -1,4 +1,8 @@
-"""Validator Agent —— 验证 COA 矩阵格式并提取仿真矩阵数据。"""
+"""Validator Agent —— 验证 COA 矩阵格式并提取仿真矩阵数据。
+
+默认（``use_llm: false``）走确定性检查 ``core.coa_checks``，不再为最终产物额外调用一次 LLM；
+``use_llm: true`` 时才懒加载结构化 LLM 链，失败仍回退到确定性检查。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 
+from ..core.coa_checks import check_coa
 from ..schemas.coa import COA
 from ..schemas.validation_result import ValidationResult
 from .base import BaseAgent
@@ -21,18 +26,22 @@ class ValidatorAgent(BaseAgent):
 
     prompt_variables = ("coa_json", "mission", "validation_rules")
 
-    def __init__(self) -> None:
-        super().__init__("validator")
+    def __init__(self, profile: Optional[str] = None) -> None:
+        super().__init__("validator", profile=profile)
         self.validation_rules: List[str] = self.get_config_value(
             "validation_rules",
             ["matrix_completeness", "phase_progression", "unit_coordination", "effect_coverage"],
         )
-
-        prompt = self._build_prompt()
-        self._structured_chain, self._fallback_chain = self.build_structured_chain_pair(
-            ValidationResult, prompt
+        self.use_llm: bool = bool(self.agent_cfg.get("use_llm", False))
+        self._chains: Optional[tuple] = None
+        logger.info(
+            f"ValidatorAgent initialized with rules: {self.validation_rules} (use_llm={self.use_llm})"
         )
-        logger.info(f"ValidatorAgent initialized with rules: {self.validation_rules}")
+
+    def _get_chains(self) -> tuple:
+        if self._chains is None:
+            self._chains = self.build_structured_chain_pair(ValidationResult, self._build_prompt())
+        return self._chains
 
     def _build_prompt(self) -> ChatPromptTemplate:
         return ChatPromptTemplate.from_messages(
@@ -42,14 +51,38 @@ class ValidatorAgent(BaseAgent):
             ],
         )
 
+    def validate_deterministic(
+        self, coa: COA, raw_text: str = ""
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """不调用 LLM 的验证：结构检查 + 自动补全缺失单元格 + 矩阵提取。"""
+        report = check_coa(coa, raw_text)
+        corrected = self._attempt_fix_coa(coa, report.issues)
+        feedback = (
+            "确定性检查通过" if report.passed else f"确定性检查发现 {len(report.issues)} 个问题"
+        )
+        return report.passed, feedback, {
+            "corrected_coa_data": corrected.model_dump(),
+            "pure_matrix_data": self._extract_basic_matrix(coa),
+            "issues_found": list(report.issues),
+            "warnings": list(report.warnings),
+            "metrics": dict(report.metrics),
+            "validation_feedback": feedback,
+            "mode": "deterministic",
+        }
+
     async def validate_and_extract_matrix(
         self,
         coa: COA,
         mission_desc: str = "",
         *,
+        raw_text: str = "",
         config: Optional[RunnableConfig] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """返回 `(is_valid, feedback, extras_dict)`。"""
+        if not self.use_llm:
+            return self.validate_deterministic(coa, raw_text)
+
+        structured_chain, fallback_chain = self._get_chains()
         rules_translated = "\n".join(
             f"- {rule}" for rule in self._translate_rules(self.validation_rules)
         )
@@ -64,25 +97,18 @@ class ValidatorAgent(BaseAgent):
         try:
             result_dict = await self.invoke_structured(
                 ValidationResult,
-                self._structured_chain,
-                self._fallback_chain,
+                structured_chain,
+                fallback_chain,
                 inputs,
                 config=merged_config,
             )
         except Exception as validate_error:
             logger.error(
-                f"Validator failed, falling back to basic validation: {validate_error}"
+                f"Validator failed, falling back to deterministic validation: {validate_error}"
             )
-            return (
-                self._basic_validate(coa),
-                f"Validator failed: {validate_error}",
-                {
-                    "corrected_coa_data": coa.model_dump(),
-                    "pure_matrix_data": self._extract_basic_matrix(coa),
-                    "issues_found": [str(validate_error)],
-                    "validation_feedback": "回退到基本验证与矩阵提取",
-                },
-            )
+            is_valid, _, extras = self.validate_deterministic(coa, raw_text)
+            extras["issues_found"] = [str(validate_error), *extras["issues_found"]]
+            return is_valid, f"Validator failed: {validate_error}", extras
 
         is_valid = bool(result_dict.get("is_valid", False))
         feedback = str(result_dict.get("validation_feedback", ""))
@@ -106,6 +132,7 @@ class ValidatorAgent(BaseAgent):
             "pure_matrix_data": pure_matrix_data,
             "issues_found": result_dict.get("issues_found", []),
             "validation_feedback": feedback,
+            "mode": "llm",
         }
 
     # ── 工具方法 ──
@@ -203,4 +230,5 @@ class ValidatorAgent(BaseAgent):
                 for dp in coa.decision_points
             ],
             "risks": coa.critical_risks,
+            "expected_outcomes": [o.model_dump() for o in coa.expected_outcomes],
         }

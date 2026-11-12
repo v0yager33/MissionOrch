@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -30,9 +31,9 @@ class KnowledgeResearcherAgent(BaseAgent):
 
     prompt_variables = ("mission_analysis", "research_queries", "max_tool_calls")
 
-    def __init__(self) -> None:
-        super().__init__("researcher")
-        self.max_tool_calls: int = int(self.agent_cfg.get("max_tool_calls", 6))
+    def __init__(self, profile: Optional[str] = None) -> None:
+        super().__init__("researcher", profile=profile)
+        self.max_tool_calls: int = int(self.agent_cfg.get("max_tool_calls", 4))
         logger.info(
             f"KnowledgeResearcherAgent initialized (max_tool_calls={self.max_tool_calls})"
         )
@@ -127,35 +128,31 @@ class KnowledgeResearcherAgent(BaseAgent):
             # 所以即便本轮 tool_calls 会把我们推过 max_tool_calls 上限，也要把
             # 本轮所有 tool_call 都执行（或至少回一条占位 ToolMessage）。
             # 上限判定放在『执行完本轮所有 tool_calls 之后』再做。
+            # 同一轮的多个检索互不依赖 → 并发执行，结果按原顺序回填。
             over_limit_before = tool_calls_used >= self.max_tool_calls
-            for call in tool_calls:
-                tool_name = call.get("name")
-                tool_args = call.get("args") or {}
-                tool_id = call.get("id", "")
-                tool = tool_map.get(tool_name)
 
+            async def _run_call(call: Dict[str, Any]) -> str:
+                tool_name = call.get("name")
+                tool = tool_map.get(tool_name)
                 if over_limit_before:
                     # 已经超上限，不再实际跑工具（避免继续烧 token），
                     # 但仍然必须给每个 tool_call_id 回一条 ToolMessage
-                    content = (
+                    return (
                         "[已达到工具调用上限，本次调用被跳过] "
                         "请基于已有检索结果直接输出研究简报。"
                     )
-                elif tool is None:
-                    content = (
-                        f"[错误] 工具 {tool_name} 未注册，"
-                        f"可用工具：{list(tool_map)}"
-                    )
-                else:
-                    try:
-                        result = await tool.ainvoke(tool_args)
-                        content = str(result)
-                    except Exception as tool_error:
-                        content = f"[工具执行失败] {tool_error}"
+                if tool is None:
+                    return f"[错误] 工具 {tool_name} 未注册，可用工具：{list(tool_map)}"
+                try:
+                    return str(await tool.ainvoke(call.get("args") or {}))
+                except Exception as tool_error:
+                    return f"[工具执行失败] {tool_error}"
 
+            contents = await asyncio.gather(*(_run_call(c) for c in tool_calls))
+            for call, content in zip(tool_calls, contents):
                 tool_calls_used += 1
                 messages.append(
-                    ToolMessage(content=content, tool_call_id=tool_id)
+                    ToolMessage(content=content, tool_call_id=call.get("id", ""))
                 )
 
             # 已达上限 → 强制收敛；关键是必须在 tool_calls 全部 ACK 之后才追加

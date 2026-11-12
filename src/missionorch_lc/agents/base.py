@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Type
@@ -27,6 +29,7 @@ from pydantic import BaseModel
 
 from ..core.model_router import ModelRouter
 from ..core.prompt_loader import escape_prompt_text, load_prompt_text
+from ..core.settings import resolve_path
 
 logger = logging.getLogger(__name__)
 interaction_logger = logging.getLogger("missionorch_lc.interactions")
@@ -36,13 +39,75 @@ class AgentConfigError(Exception):
     """Agent 配置错误。"""
 
 
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def resolve_profile_name(config: Dict[str, Any], profile: Optional[str] = None) -> Optional[str]:
+    """profile 解析顺序：显式参数 → MISSIONORCH_PROFILE → workflow.default_profile。"""
+    name = profile or os.environ.get("MISSIONORCH_PROFILE") or (
+        (config.get("workflow") or {}).get("default_profile")
+    )
+    if not name:
+        return None
+    profiles = config.get("profiles") or {}
+    if name not in profiles:
+        raise AgentConfigError(f"未知 profile '{name}'，可用: {list(profiles)}")
+    return name
+
+
+def apply_profile(config: Dict[str, Any], profile: Optional[str] = None) -> Dict[str, Any]:
+    """把 profiles.<name>.agents / workflow 覆盖到基础配置上，返回新的 dict。"""
+    name = resolve_profile_name(config, profile)
+    if not name:
+        return config
+    prof = config["profiles"][name] or {}
+    merged = dict(config)
+    merged["agents"] = _deep_merge(config.get("agents") or {}, prof.get("agents") or {})
+    merged["workflow"] = _deep_merge(config.get("workflow") or {}, prof.get("workflow") or {})
+    merged["active_profile"] = name
+    return merged
+
+
+def load_agents_config(
+    config_path: str | Path | None = None, profile: Optional[str] = None
+) -> Dict[str, Any]:
+    """读取 agents.yaml 并应用 profile（供 orchestrator 读取 workflow 参数）。"""
+    if config_path is None:
+        from ..core.settings import get_settings
+        config_path = get_settings().agents_config
+    path = resolve_path(config_path)
+    if not path.exists():
+        raise AgentConfigError(f"Agent 配置文件不存在: {config_path}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as yaml_error:
+        raise AgentConfigError(f"YAML 解析错误: {yaml_error}") from yaml_error
+    if not isinstance(config, dict) or "agents" not in config:
+        raise AgentConfigError(f"Agent 配置文件格式错误: {config_path}")
+    return apply_profile(config, profile)
+
+
 class BaseAgent:
     """所有 LangChain Agent 的公共基类。"""
 
     # 子类覆盖：system prompt 中允许被 LangChain 模板解析的变量名白名单
     prompt_variables: Iterable[str] = ()
 
-    def __init__(self, agent_type: str, config_path: str | None = None) -> None:
+    def __init__(
+        self,
+        agent_type: str,
+        config_path: str | None = None,
+        *,
+        profile: Optional[str] = None,
+    ) -> None:
         if config_path is None:
             from ..core.settings import get_settings
             config_path = str(get_settings().agents_config)
@@ -50,7 +115,8 @@ class BaseAgent:
         self.agent_type = agent_type
         self.config_path = config_path
 
-        self.config = self._load_config(config_path)
+        self.config = self._load_config(config_path, profile)
+        self.profile: Optional[str] = self.config.get("active_profile")
         self.agent_cfg = self._validate_agent_config(self.config, agent_type)
         self.workflow_cfg = self.config.get("workflow", {})
 
@@ -60,31 +126,25 @@ class BaseAgent:
 
         # 温度覆盖：使用 LangChain 的 .bind 机制注入到请求
         self.temperature_override: Optional[float] = self.agent_cfg.get("temperature_override")
+        # 输出长度覆盖（仅 bind_model 链路生效）
+        self.max_tokens_override: Optional[int] = self.agent_cfg.get("max_tokens")
 
         # RAG 开关（实际检索由 RAG Tool 负责，这里只保留开关状态）
         self.use_rag: bool = bool(self.agent_cfg.get("use_rag", False))
         self.rag_retrieval_depth: int = int(self.agent_cfg.get("rag_retrieval_depth", 5))
 
         # 提示词路径 —— 实际加载/转义走 prompt_loader（带 mtime 缓存）
-        self.prompt_path: Optional[str] = self.agent_cfg.get("prompt_file")
+        prompt_file = self.agent_cfg.get("prompt_file")
+        self.prompt_path: Optional[str] = str(resolve_path(prompt_file)) if prompt_file else None
 
-        logger.info(f"BaseAgent '{agent_type}' initialized with model '{self.model_id}'")
+        logger.info(
+            f"BaseAgent '{agent_type}' initialized with model '{self.model_id}'"
+            + (f" (profile={self.profile})" if self.profile else "")
+        )
 
     # ── 配置加载 ──
-    def _load_config(self, path: str) -> Dict[str, Any]:
-        config_path = Path(path).resolve()
-        if not config_path.exists():
-            raise AgentConfigError(f"Agent 配置文件不存在: {path}")
-
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-        except yaml.YAMLError as yaml_error:
-            raise AgentConfigError(f"YAML 解析错误: {yaml_error}") from yaml_error
-
-        if not isinstance(config, dict) or "agents" not in config:
-            raise AgentConfigError(f"Agent 配置文件格式错误: {path}")
-        return config
+    def _load_config(self, path: str, profile: Optional[str] = None) -> Dict[str, Any]:
+        return load_agents_config(path, profile)
 
     def _validate_agent_config(self, config: Dict[str, Any], agent_type: str) -> Dict[str, Any]:
         if agent_type not in config["agents"]:
@@ -123,6 +183,8 @@ class BaseAgent:
         保证 tool-calling / 温度覆盖 / 重试 / 降级都能共存。
         """
         runnable: Runnable = self.raw_model
+        if self.max_tokens_override:
+            extra_bind = {"max_tokens": int(self.max_tokens_override), **(extra_bind or {})}
 
         if self.temperature_override is not None:
             runnable = runnable.bind(temperature=self.temperature_override)
