@@ -555,6 +555,375 @@ def test_sdk_http_defaults_are_preserved():
         assert client.follow_redirects is True
 
 
+def test_build_repairs_and_keeps_verified_recovery(recorder, tmp_path):
+    first, second, _, broken, _ = broken_then_repaired(recorder)
+    recorder.flush()
+    raw = {path: path.read_bytes() for path in recorder.files}
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    result = asyncio.run(cli.build([recorder.directory], work, out, validation_fraction=0, offline=True))
+    assert result["ready"] is True
+    assert result["verified"]["dataset_train"] == 1
+    assert result["candidates"]["dataset_train"] == 1
+    row = processing.load_rows(out / "train.messages.jsonl")[0]
+    assert row["call_id"] == second and row["kind"] == "recovery"
+    assert row["messages"][1] == broken
+    assert row["assistant_loss_mask"] == [False, False, False, True]
+    reused = processing.load_rows(work / "repairs.jsonl")[0]
+    assert reused["call_id"] == first and reused["status"] == "candidate"
+    assert reused["validation"]["evidence"] == []
+    assert reused["invalidated_event_ids"]
+    assert result["stages"]["repair"]["recovery_segments_preserved"] == 1
+    for item in result["files"]:
+        assert hashlib.sha256((out / item["path"]).read_bytes()).hexdigest() == item["sha256"]
+    assert all(path.read_bytes() == value for path, value in raw.items())
+
+
+def test_build_without_evidence_is_honestly_empty(recorder, tmp_path, monkeypatch):
+    with core.trace_call("mock", "m", {"messages": [{"role": "user", "content": "task"}]}) as call:
+        call.complete({"content": "ok"})
+    recorder.flush()
+    async def forbidden(*args):
+        raise AssertionError("离线 build 不得加载配置模型")
+    monkeypatch.setattr(cli, "model_client", forbidden)
+    out = tmp_path / "bundle"
+    assert cli.main(["build", str(recorder.directory), "--outdir", str(out),
+                     "--validation-fraction", "0", "--offline"]) == 0
+    manifest = processing.load_rows(out / "manifest.jsonl")[0]
+    assert manifest["ready"] is False
+    assert processing.load_rows(out / "train.messages.jsonl") == []
+    assert len(processing.load_rows(out / "candidates/train.messages.jsonl")) == 1
+    assert (tmp_path / "trajectory-work/bundle/original.jsonl").exists()
+    assert not (tmp_path / "bundle-work").exists()
+
+
+def test_model_build_repairs_partial_and_resumes(recorder, tmp_path):
+    with core.scope(trace_id="partial"):
+        with core.trace_call("mock", "m", {"messages": [{"role": "user", "content": "code"}]}) as call:
+            call.complete({"content": "```python\nx =", "finish_reason": "length"})
+    recorder.flush()
+    calls = []
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        calls.append(source["id"])
+        return json.dumps({"assistant": {"role": "assistant", "content": "```python\nx = 1\n```"},
+                           "source_event_ids": source["source_event_ids"], "verification_claims": ["已通过测试"]})
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    args = dict(complete=complete, model="mock", validation_fraction=0)
+    result = asyncio.run(cli.build([recorder.directory], work, out, **args))
+    assert result["ready"] is False and result["pending_repairs"] == 0
+    assert processing.load_rows(work / "synthetic.jsonl")[0]["status"] == "candidate"
+    asyncio.run(cli.build([recorder.directory], work, out, **args))
+    assert len(calls) == 1
+    assert len(processing.load_rows(out / "candidates/train.messages.jsonl")) == 1
+
+
+def test_imported_evidence_binds_current_input_and_artifact(recorder, tmp_path):
+    broken_then_repaired(recorder)
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    asyncio.run(cli.build([recorder.directory], work, out, validation_fraction=0, offline=True))
+    source = processing.load_rows(work / "repairs.jsonl")[0]
+    report = {"sample_id": source["id"], "artifact_hash": source["artifact_hash"], "input_hash": source["input_hash"],
+              "source": "trusted_test", "validation_scope": "unit_test", "passed": True}
+    path = tmp_path / "evidence.jsonl"
+    for key, value in (("artifact_hash", "wrong"), ("input_hash", "wrong"), ("validation_scope", "syntax")):
+        processing.write_rows(path, [{**report, key: value}])
+        with pytest.raises(processing.DataError):
+            processing.import_evidence(work, [path])
+    processing.write_rows(path, [report])
+    assert processing.import_evidence(work, [path])["imported"] == 1
+    assert processing.import_evidence(work, [path])["imported"] == 0
+    processing.validate_workdir(work)
+    assert processing.load_rows(work / "repairs.jsonl")[0]["status"] == "verified"
+    processing.export(work, out, validation_fraction=0)
+    assert len(processing.load_rows(out / "train.messages.jsonl")) == 2
+    processing.write_rows(path, [{**report, "passed": False, "report_id": "failed-run"}])
+    processing.import_evidence(work, [path])
+    processing.validate_workdir(work)
+    assert processing.load_rows(work / "repairs.jsonl")[0]["status"] == "rejected"
+    processing.write_rows(path, [{**report, "report_id": "new-passed-run"}])
+    processing.import_evidence(work, [path])
+    processing.validate_workdir(work)
+    assert processing.load_rows(work / "repairs.jsonl")[0]["status"] == "verified"
+    rows = processing.load_rows(work / "repairs.jsonl")
+    rows[0]["messages"][0]["content"] = "不同任务上下文"
+    processing.write_rows(work / "repairs.jsonl", rows)
+    processing.validate_workdir(work)
+    assert processing.load_rows(work / "repairs.jsonl")[0]["status"] == "rejected"
+
+
+def test_build_does_not_reuse_stale_synthesis_from_other_input(recorder, tmp_path):
+    broken_then_repaired(recorder)
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        return json.dumps({"assistant": {"role": "assistant", "content": "corrected"},
+                           "source_event_ids": source["source_event_ids"]})
+    asyncio.run(cli.build([recorder.directory], work, out, complete=complete, model="mock"))
+    other = tmp_path / "other"
+    other.mkdir()
+    result = asyncio.run(cli.build([other], work, out))
+    assert result["verified"]["dataset_train"] == result["candidates"]["dataset_train"] == 0
+    assert "stale_source_events" in processing.load_rows(work / "synthetic.jsonl")[0]["validation"]["issues"]
+
+
+def test_build_and_export_protect_empty_raw_directory(tmp_path):
+    raw, work = tmp_path / "raw-root", tmp_path / "work"
+    raw.mkdir()
+    with pytest.raises(processing.DataError):
+        asyncio.run(cli.build([raw], work, raw / "export"))
+    assert not work.exists()
+    processing.process([raw], work)
+    with pytest.raises(processing.DataError):
+        processing.export(work, raw / "export")
+    with pytest.raises(processing.DataError):
+        processing.repair(tmp_path / "missing-work")
+
+
+def test_cli_model_repair_and_validation(recorder, tmp_path, monkeypatch):
+    broken_then_repaired(recorder)
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    selected = []
+    async def client(model, preset, max_output_tokens):
+        selected.append(model)
+        async def complete(messages):
+            source = json.loads(messages[-1]["content"])
+            return json.dumps({"assistant": {"role": "assistant", "content": "fixed"},
+                               "source_event_ids": source["source_event_ids"]})
+        return "mock", complete, None
+    monkeypatch.setattr(cli, "model_client", client)
+    assert cli.main(["build", str(recorder.directory), "--workdir", str(work), "--outdir", str(out),
+                     "--synthesize", "--model", "mock"]) == 0
+    assert selected == ["mock"]
+    assert cli.main(["repair", "--workdir", str(work), "--offline"]) == 0
+    assert cli.main(["validate", "--workdir", str(work)]) == 0
+
+
+def test_synthetic_recovery_supervises_only_final_repair(recorder, tmp_path):
+    with core.scope(trace_id="repair"):
+        request = {"messages": [{"role": "user", "content": "修复代码"},
+                                {"role": "assistant", "content": "```python\ndef bad(:\n```"},
+                                {"role": "user", "content": "SyntaxError: 修复"}]}
+        with core.trace_call("mock", "m", request) as call:
+            call.complete({"content": "```python\ndef bad(:\n```"})
+    recorder.flush()
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        return json.dumps({"assistant": {"role": "assistant", "content": "```python\ndef good():\n    return 1\n```"},
+                           "source_event_ids": source["source_event_ids"]})
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    asyncio.run(cli.build([recorder.directory], work, out, complete=complete, model="mock", validation_fraction=0))
+    rows = processing.load_rows(out / "candidates/train.messages.jsonl")
+    assert rows[0]["kind"] == "recovery" and rows[0]["repair_segment_preserved"]
+    assert rows[0]["assistant_loss_mask"] == [False, False, False, True]
+    assert rows[0]["messages"][:-1] == request["messages"]
+
+
+def test_semantic_error_is_repaired_and_not_supervised(recorder, tmp_path):
+    prompt = [{"role": "user", "content": "返回 1"}]
+    broken = {"role": "assistant", "content": "```python\ndef value():\n    return 0\n```"}
+    fixed = {"role": "assistant", "content": "```python\ndef value():\n    return 1\n```"}
+    with core.scope(trace_id="semantic", run_id="branch"):
+        with core.trace_call("mock", "m", {"messages": prompt}) as first:
+            first.complete(broken)
+        core.emit("tool_end", {"status": "error", "result": "AssertionError"})
+        request = {"messages": prompt + [broken, {"role": "user", "content": "AssertionError"}]}
+        with core.trace_call("mock", "m", request) as call:
+            call.complete(fixed)
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    calls = []
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        calls.append(source["call_id"])
+        return json.dumps({"assistant": fixed, "source_event_ids": source["source_event_ids"]})
+    asyncio.run(cli.build([recorder.directory], work, out, complete=complete, model="mock", validation_fraction=0))
+    assert calls == [first.id]
+    initial = next(row for row in processing.load_rows(work / "corrected.jsonl") if row["call_id"] == first.id)
+    assert initial["status"] == "rejected" and not any(initial["assistant_loss_mask"])
+    rows = processing.load_rows(out / "candidates/train.messages.jsonl")
+    assert all(row["messages"][-1]["content"] != broken["content"] for row in rows)
+    assert any(broken in row["messages"][:-1] for row in rows)
+
+
+def test_real_synthesis_recording_does_not_poison_resume(recorder, tmp_path):
+    broken_then_repaired(recorder)
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    calls = []
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        calls.append(source["id"])
+        text = json.dumps({"assistant": {"role": "assistant", "content": "fixed"},
+                           "source_event_ids": source["source_event_ids"]})
+        with core.trace_call("mock", "m", {"messages": messages}) as call:
+            call.complete({"content": text})
+        recorder.flush()
+        return text
+    for _ in range(2):
+        asyncio.run(cli.build([recorder.directory], work, out, complete=complete, model="mock"))
+    assert len(calls) == 1
+    synthesis_events = [row for row in events(recorder) if row.get("agent") == "trajectory_synthesis"]
+    assert all(row["trace_id"] != "task" for row in synthesis_events)
+
+
+def test_evidence_never_crosses_project_or_context():
+    event = {"event": "verification", "event_id": "v", "project": "other", "trace_id": "other",
+             "data": {"passed": True, "artifact_hash": "a", "target_call_id": "c", "source": "trusted_test",
+                      "validation_scope": "unit_test", "input_hash": "old"}}
+    assert not processing.verified_evidence([event], "a", "c", project="current")
+    assert not processing.verified_evidence([event], "a", "c", input_hash="new")
+
+
+def record_repair_batch(recorder, count):
+    for index in range(count):
+        with core.scope(trace_id=f"partial-{index}"):
+            with core.trace_call("mock", "m", {"messages": [{"role": "user", "content": str(index)}]}) as call:
+                call.complete({"content": "```python\nx =", "finish_reason": "length"})
+    recorder.flush()
+
+
+@pytest.mark.parametrize("entry", ["build", "repair", "python"])
+def test_default_repair_covers_all_and_resumes(recorder, tmp_path, monkeypatch, entry):
+    record_repair_batch(recorder, 13)
+    with core.scope(trace_id="healthy"):
+        with core.trace_call("mock", "m", {"messages": [{"role": "user", "content": "healthy"}]}) as call:
+            call.complete({"content": "ok"})
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    calls, active, peak = [], 0, 0
+    async def client(model, preset, max_output_tokens):
+        async def complete(messages):
+            nonlocal active, peak
+            source = json.loads(messages[-1]["content"])
+            calls.append(source["id"])
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return json.dumps({"assistant": {"role": "assistant", "content": "```python\nx = 1\n```"},
+                               "source_event_ids": source["source_event_ids"]})
+        return "mock", complete, None
+    monkeypatch.setattr(cli, "model_client", client)
+    if entry == "repair":
+        processing.process([recorder.directory], work)
+    for _ in range(2):
+        if entry == "python":
+            result = asyncio.run(cli.build([recorder.directory], work, out, model="mock", validation_fraction=0))
+            assert result["pending_repairs"] == 0
+        else:
+            args = [entry, "--workdir", str(work), "--model", "mock"]
+            if entry == "build":
+                args += [str(recorder.directory), "--outdir", str(out)]
+            assert cli.main(args) == 0
+    assert len(calls) == len(set(calls)) == 13
+    assert peak == 2 and active == 0
+    rows = processing.load_rows(work / "synthetic.jsonl")
+    assert len(rows) == 13 and all(row["status"] == "candidate" for row in rows)
+    assert all(row["assistant_loss_mask"] == [False, True] for row in rows)
+
+
+@pytest.mark.parametrize("entry", ["build", "repair", "python"])
+def test_explicit_repair_limit_then_default_finishes_remainder(recorder, tmp_path, monkeypatch, entry):
+    record_repair_batch(recorder, 13)
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    calls = []
+    async def client(*args):
+        async def complete(messages):
+            source = json.loads(messages[-1]["content"])
+            calls.append(source["id"])
+            return json.dumps({"assistant": {"role": "assistant", "content": "fixed"},
+                               "source_event_ids": source["source_event_ids"]})
+        return "mock", complete, None
+    monkeypatch.setattr(cli, "model_client", client)
+    if entry == "repair":
+        processing.process([recorder.directory], work)
+    for limit, expected in ((3, 3), (None, 13), (None, 13)):
+        if entry == "python":
+            result = asyncio.run(cli.build([recorder.directory], work, out, model="mock", limit=limit))
+            assert result["pending_repairs"] == 13 - expected
+        else:
+            args = [entry, "--workdir", str(work), "--model", "mock"]
+            if entry == "build":
+                args += [str(recorder.directory), "--outdir", str(out)]
+            if limit is not None:
+                args += ["--limit", str(limit)]
+            assert cli.main(args) == 0
+        assert len(calls) == len(set(calls)) == expected
+
+
+@pytest.mark.parametrize("entry", ["build", "repair", "python"])
+@pytest.mark.parametrize("disabled", ["offline", "zero"])
+def test_offline_and_zero_limit_never_load_model(recorder, tmp_path, monkeypatch, entry, disabled):
+    record_repair_batch(recorder, 1)
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    async def forbidden(*args):
+        raise AssertionError("离线或零限额不得加载模型")
+    monkeypatch.setattr(cli, "model_client", forbidden)
+    if entry == "python":
+        kwargs = {"offline": True} if disabled == "offline" else {"limit": 0}
+        result = asyncio.run(cli.build([recorder.directory], work, out, **kwargs))
+        assert result["pending_repairs"] == 1
+    else:
+        if entry == "repair":
+            processing.process([recorder.directory], work)
+        args = [entry, "--workdir", str(work)]
+        if entry == "build":
+            args += [str(recorder.directory), "--outdir", str(out)]
+        args += ["--offline"] if disabled == "offline" else ["--limit", "0"]
+        assert cli.main(args) == 0
+    assert not processing.load_rows(work / "synthetic.jsonl")
+
+
+@pytest.mark.parametrize("entry", ["build", "repair"])
+def test_no_repair_needed_never_loads_model(recorder, tmp_path, monkeypatch, entry):
+    with core.trace_call("mock", "m", {"messages": [{"role": "user", "content": "healthy"}]}) as call:
+        call.complete({"content": "ok"})
+    recorder.flush()
+    work, out = tmp_path / "work", tmp_path / "bundle"
+    async def forbidden(*args):
+        raise AssertionError("无待修复项不得加载模型")
+    monkeypatch.setattr(cli, "model_client", forbidden)
+    args = [entry, "--workdir", str(work)]
+    if entry == "repair":
+        processing.process([recorder.directory], work)
+    else:
+        args += [str(recorder.directory), "--outdir", str(out)]
+    assert cli.main(args) == 0
+
+
+@pytest.mark.parametrize("entry", ["cli", "python"])
+def test_synthesize_default_is_unlimited_and_zero_still_disables(recorder, tmp_path, monkeypatch, entry):
+    record_repair_batch(recorder, 13)
+    work = tmp_path / "work"
+    processing.process([recorder.directory], work)
+    calls = []
+    async def complete(messages):
+        source = json.loads(messages[-1]["content"])
+        calls.append(source["id"])
+        return json.dumps({"assistant": {"role": "assistant", "content": "fixed"},
+                           "source_event_ids": source["source_event_ids"]})
+    async def client(*args):
+        return "mock", complete, None
+    async def forbidden(*args):
+        raise AssertionError("零限额不得加载模型")
+    monkeypatch.setattr(cli, "model_client", forbidden)
+    if entry == "cli":
+        assert cli.main(["synthesize", "--workdir", str(work), "--limit", "0"]) == 0
+    else:
+        assert asyncio.run(cli.synthesize(work, complete, "mock", limit=0))["selected"] == 0
+    assert not calls
+    monkeypatch.setattr(cli, "model_client", client)
+    for _ in range(2):
+        if entry == "cli":
+            assert cli.main(["synthesize", "--workdir", str(work), "--model", "mock"]) == 0
+        else:
+            asyncio.run(cli.synthesize(work, complete, "mock"))
+    assert len(calls) == len(set(calls)) == 13
+
+
 def test_shared_contract_sources_match():
     root = Path(__file__).resolve().parents[2]
     source = root / "MissionOrch-LC/src/missionorch_lc/trajectory"

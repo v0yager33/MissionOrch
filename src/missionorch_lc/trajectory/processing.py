@@ -44,6 +44,20 @@ def overlaps(left, right):
     return left.is_relative_to(right) or right.is_relative_to(left)
 
 
+def input_roots(inputs):
+    roots = set()
+    for item in inputs:
+        path = Path(item).expanduser().resolve()
+        if path.is_file():
+            roots.add(source_root(path))
+        elif path.is_dir():
+            roots.add(path.parent if path.name in {"raw", "blobs"} else path)
+        else:
+            raise DataError(f"轨迹输入不存在：{path}")
+    roots.update(source_root(path) for path in files_at(inputs))
+    return roots
+
+
 def read_events(inputs):
     events, statistics, seen = [], Counter(), set()
     for path in files_at(inputs):
@@ -283,24 +297,38 @@ def same_branch(event, start):
         "parent_call_id"))
 
 
-def verified_evidence(events, target_hash, call_id):
-    evidence = []
+def verified_evidence(events, target_hash, call_id, *, input_hash=None, project=None,
+                      trace_id=None, sample_id=None, require_input=False, include_failed=False):
+    evidence = {}
     for event in events:
         data = event.get("data") or {}
         if event.get("event") != "verification" or not isinstance(data, dict):
             continue
-        if (data.get("passed") is True and data.get("artifact_hash") == target_hash
+        if project is not None and event.get("project") != project:
+            continue
+        if trace_id is not None and event.get("trace_id") != trace_id:
+            continue
+        if data.get("target_sample_id") and data["target_sample_id"] != sample_id:
+            continue
+        if require_input and data.get("input_hash") != input_hash:
+            continue
+        if input_hash is not None and data.get("input_hash") not in {None, input_hash}:
+            continue
+        if (isinstance(data.get("passed"), bool) and data.get("artifact_hash") == target_hash
+                and isinstance(data.get("validation_scope"), str)
                 and data.get("target_call_id") == call_id
                 and data.get("source") in {"real_execution", "trusted_test"}
-                and data.get("validation_scope") not in {None, "syntax", "structure", "model_judgment"}):
-            evidence.append({"event_id": event["event_id"], **data})
-    return evidence
+                and data.get("validation_scope") not in {None, "", "syntax", "structure", "model_judgment"}):
+            evidence[data["validation_scope"]] = {"event_id": event["event_id"], **data}
+    if not include_failed and any(row["passed"] is False for row in evidence.values()):
+        return []
+    return list(evidence.values())
 
 
 def process(inputs, workdir):
     workdir = Path(workdir).expanduser().resolve()
-    for source in files_at(inputs):
-        if overlaps(workdir, source_root(source)):
+    for source in input_roots(inputs):
+        if overlaps(workdir, source):
             raise DataError("处理目录不能与原始采集目录重叠（包括 raw 和 blobs）")
     events, stats = read_events(inputs)
     by_call, by_trace = defaultdict(list), defaultdict(list)
@@ -396,7 +424,10 @@ def process(inputs, workdir):
             0) for r in rows)
         target_hash = digest(artifact(output))
         trace_events = by_trace[(project, start.get("trace_id"))]
-        evidence = verified_evidence(trace_events, target_hash, call_id)
+        checks = verified_evidence(trace_events, target_hash, call_id, input_hash=digest(snapshot),
+                                   project=project, trace_id=start.get("trace_id"), include_failed=True)
+        failure = failure or any(check["passed"] is False for check in checks)
+        evidence = checks if not failure else []
         if incomplete or not snapshot:
             status = "incomplete"
         elif failure or issues:
@@ -605,6 +636,7 @@ def process(inputs, workdir):
     write_rows(workdir / "recovery.jsonl", recovery)
     # 事件关联视图保留没有 call_id 的工具/压缩/ReAct/子 Agent 等边界。
     write_rows(workdir / "events.jsonl", events)
+    write_rows(workdir / "source-roots.jsonl", [{"directory": str(root)} for root in sorted(input_roots(inputs))])
     # 回调 run ID 只作执行关联，不能冒充供应商 tool_call_id。
     callback_tools = { e.get(
         "callback_run_id"): e.get(
@@ -686,6 +718,8 @@ def correction(source, proposal, model):
                       "downstream_event_ids",
                       [ ]))) if changed else [ ],
                       status="candidate")
+    result["repair_of"] = source["id"]
+    result["source_status"] = source["status"]
     result["source_artifact_hash"] = source["artifact_hash"]
     result["dependency_change"] = "invalidate_downstream" if changed else "unchanged"
     result["reusable_downstream_event_ids"] = []
@@ -719,8 +753,8 @@ def correction(source, proposal, model):
         issues.append("missing_input_snapshot")
     if any(msg.get("role") == "tool" for msg in [proposed]):
         issues.append("fabricated_tool_result")
-    if source["status"] == "incomplete":
-        issues.append("incomplete_source")
+    if any(event.get("collection_errors") for event in source.get("events", [])):
+        issues.append("incomplete_collection")
     result["status"] = "rejected" if issues else "candidate"
     result[
         "validation"] = {
@@ -730,7 +764,156 @@ def correction(source, proposal, model):
         ],
         "model_claim_is_not_evidence": True}
     result["assistant_loss_mask"] = [False] * (len(result["messages"]) - 1) + [not issues]
+    error_indices = [index for index, msg in enumerate(result["messages"][:-1])
+                     if msg.get("role") in {"user", "tool"} and isinstance(msg.get("content"), str)
+                     and re.search(r"(?i)error|traceback|失败|错误|syntaxerror", msg["content"])]
+    if error_indices:
+        result.update(kind="recovery", error_context_indices=error_indices, error_state_visible=True,
+                      repair_segment_preserved=True)
     return result
+
+
+VIEW_FILES = ("corrected.jsonl", "recovery.jsonl", "repairs.jsonl", "synthetic.jsonl")
+
+
+def repair(workdir):
+    """复用真实后续修订生成初稿候选；真实错误和恢复段保持不变。"""
+    workdir = Path(workdir).resolve()
+    if not (workdir / "original.jsonl").is_file():
+        raise DataError("请先 process 原始轨迹，或使用 build 一键生成")
+    sources = load_rows(workdir / "original.jsonl")
+    recoveries = {(row["project"], row["call_id"]): row for row in load_rows(workdir / "recovery.jsonl")
+                  if row.get("error_state_visible") and row["status"] in {"candidate", "verified"}}
+    repairs, queue, failed_sources = [], [], set()
+    for source in sources:
+        if source["status"] == "verified":
+            continue
+        revisions = [row for row in sources if (row["project"], row["call_id"]) in recoveries
+                     and row["project"] == source["project"] and row["trace_id"] == source["trace_id"]
+                     and same_branch(row, source)
+                     and any(dep.get("sample_id") == source["id"] for dep in row.get("depends_on", []))]
+        revisions = [row for row in revisions if row["artifact_hash"] != source["artifact_hash"]]
+        if source["status"] not in {"rejected", "incomplete"} and not revisions:
+            continue
+        if revisions:
+            failed_sources.add((source["project"], source["call_id"]))
+        revisions.sort(key=lambda row: (row["status"] == "verified", row["events"][-1]["timestamp"]), reverse=True)
+        result = None
+        for revision in revisions:
+            related = {event: revision["artifact_hash"] for event in revision["source_event_ids"]}
+            result = correction({**source, "related_event_ids": list(related), "related_artifact_hashes": related}, {
+                "assistant": copy.deepcopy(revision["messages"][-1]),
+                "source_event_ids": source["source_event_ids"] + revision["source_event_ids"],
+                "changes": [{"description": "复用真实后续修订作为初稿候选；未复用旧观察或验证",
+                             "before_hash": source["artifact_hash"], "after_hash": revision["artifact_hash"]}],
+            }, None)
+            if result["status"] == "candidate":
+                result.update(repair_strategy="reuse_real_revision", revision_sample_id=revision["id"],
+                              synthetic=False, adapted_to_initial_context=False)
+                repairs.append(result)
+                break
+        if not result or result["status"] != "candidate":
+            queue.append({"source_id": source["id"], "lineage": source["lineage"], "status": source["status"],
+                          "artifact_hash": source["artifact_hash"], "issues": source["validation"]["issues"],
+                          "reason": "no_usable_real_revision"})
+    corrected = load_rows(workdir / "corrected.jsonl")
+    for row in corrected:
+        if (row["project"], row["call_id"]) in failed_sources:
+            row["status"] = "rejected"
+            row["assistant_loss_mask"] = [False] * len(row["messages"])
+            row["validation"] = {**row["validation"], "issues": ["superseded_after_error"], "evidence": []}
+    write_rows(workdir / "corrected.jsonl", corrected)
+    write_rows(workdir / "repairs.jsonl", repairs)
+    write_rows(workdir / "repair-queue.jsonl", queue)
+    report = {"reused_revisions": len(repairs), "unresolved": len(queue),
+              "recovery_segments_preserved": len(load_rows(workdir / "recovery.jsonl"))}
+    write_rows(workdir / "repair-report.jsonl", [report])
+    return report
+
+
+def import_evidence(workdir, paths):
+    """接入用户显式提供的测试报告；不执行报告中的任何命令。"""
+    workdir = Path(workdir).resolve()
+    samples = {row["id"]: row for name in VIEW_FILES for row in load_rows(workdir / name)}
+    stored = load_rows(workdir / "verification-imports.jsonl")
+    known = {row["event_id"] for row in stored}
+    accepted = 0
+    for path in paths:
+        path = Path(path).expanduser().resolve()
+        if not path.is_file():
+            raise DataError(f"测试报告不存在：{path}")
+        for number, report in enumerate(load_rows(path), 1):
+            if not isinstance(report, dict):
+                raise DataError("测试报告的每行必须是 JSON 对象")
+            sample = samples.get(report.get("sample_id"))
+            if not sample or report.get("artifact_hash") != sample["artifact_hash"]:
+                raise DataError("测试报告的 sample_id 或 artifact_hash 与当前样本不匹配")
+            if report.get("input_hash") != digest(sample["messages"][:-1]):
+                raise DataError("测试报告的 input_hash 与当前输入不匹配")
+            if (report.get("source") not in {"real_execution", "trusted_test"}
+                    or not isinstance(report.get("validation_scope"), str)
+                    or report.get("validation_scope") in {None, "", "syntax", "structure", "model_judgment"}
+                    or not isinstance(report.get("passed"), bool)):
+                raise DataError("测试报告必须声明真实执行/可信测试来源、验证范围及 passed 布尔值")
+            data = {key: report[key] for key in ("artifact_hash", "input_hash", "source", "validation_scope", "passed")}
+            data.update(target_call_id=sample["call_id"])
+            identity = "import:" + digest({"sample_id": sample["id"], "report_hash": digest(report), **data})
+            if identity not in known:
+                stored.append({"event": "verification", "event_id": identity, "project": sample["project"],
+                               "trace_id": sample["trace_id"], "data": data,
+                               "report_ref": {"file": str(path), "line": number, "sha256": digest(report)}})
+                known.add(identity)
+                accepted += 1
+    write_rows(workdir / "verification-imports.jsonl", stored)
+    return {"imported": accepted}
+
+
+def sample_evidence(sample, events, *, include_failed=False):
+    return verified_evidence(events, sample["artifact_hash"], sample.get("call_id"),
+                             input_hash=digest(sample["messages"][:-1]), project=sample.get("project"),
+                             trace_id=sample.get("trace_id"), sample_id=sample["id"],
+                             require_input=bool(sample.get("synthetic") or sample.get("repair_strategy")),
+                             include_failed=include_failed)
+
+
+def validate_workdir(workdir):
+    """确定性重验各派生视图；仅匹配当前产物及上下文的可信证据授予 verified。"""
+    workdir = Path(workdir).resolve()
+    if not (workdir / "original.jsonl").is_file():
+        raise DataError("请先 process 原始轨迹，或使用 build 一键生成")
+    events = load_rows(workdir / "events.jsonl")
+    evidence = events + load_rows(workdir / "verification-imports.jsonl")
+    event_ids = {row["event_id"] for row in events}
+    counts = Counter()
+    for name in VIEW_FILES:
+        rows = load_rows(workdir / name)
+        for row in rows:
+            transient = {"verification_failed", "stale_artifact", "stale_source_events", "stale_input_snapshot"}
+            issues = [issue for issue in row.get("validation", {}).get("issues", []) if issue not in transient]
+            issues.extend(validate_messages(row["messages"]))
+            if not row["messages"][:-1]:
+                issues.append("missing_input_snapshot")
+            if row["artifact_hash"] != digest(artifact(row["messages"][-1])):
+                issues.append("stale_artifact")
+            if not set(row["source_event_ids"]).issubset(event_ids):
+                issues.append("stale_source_events")
+            if row.get("input_hash") != digest(row["messages"][:-1]):
+                issues.append("stale_input_snapshot")
+            checks = sample_evidence(row, evidence, include_failed=True) if not issues else []
+            if any(check["passed"] is False for check in checks):
+                issues.append("verification_failed")
+            matched = checks if not issues else []
+            row["status"] = ("incomplete" if "error_state_not_visible" in issues else "rejected") if issues else (
+                "verified" if matched else "candidate")
+            row["validation"] = {**row.get("validation", {}), "issues": sorted(set(issues)), "evidence": matched,
+                                 "scope": "protocol_and_python_syntax"}
+            row["assistant_loss_mask"] = [False] * (len(row["messages"]) - 1) + [not issues]
+            counts[row["status"]] += 1
+            counts.update("issue_" + issue for issue in set(issues))
+        if (workdir / name).exists():
+            write_rows(workdir / name, rows)
+    write_rows(workdir / "validation-report.jsonl", [dict(counts)])
+    return dict(counts)
 
 
 def externalize_media(value, outdir, assets, media=False):
@@ -778,15 +961,14 @@ def export(workdir, outdir, statuses=("verified",), validation_fraction=0.1):
         "source",
         { }).get(
         "file")]
-    if any(overlaps(outdir, source_root(p)) for p in source_paths):
+    roots = [Path(row["directory"]) for row in load_rows(workdir / "source-roots.jsonl")]
+    if any(overlaps(outdir, root) for root in roots + [source_root(p) for p in source_paths]):
         raise DataError("导出目录不能与原始采集目录重叠（包括 raw 和 blobs）")
-    samples = load_rows(
-        workdir / "corrected.jsonl") + load_rows(
-        workdir / "synthetic.jsonl") + load_rows(
-        workdir / "recovery.jsonl")
+    samples = [row for name in VIEW_FILES for row in load_rows(workdir / name)]
     products, counts = defaultdict(list), Counter()
     assets = {}
-    evidence_events = load_rows(workdir / "events.jsonl")
+    evidence_events = load_rows(workdir / "events.jsonl") + load_rows(workdir / "verification-imports.jsonl")
+    event_ids = {row["event_id"] for row in load_rows(workdir / "events.jsonl")}
     for sample in samples:
         counts[f"available_{sample['status']}"] += 1
         if sample["status"] not in statuses:
@@ -794,16 +976,17 @@ def export(workdir, outdir, statuses=("verified",), validation_fraction=0.1):
         if validate_messages(sample["messages"]):
             counts["invalid_protocol_skipped"] += 1
             continue
+        if not set(sample["source_event_ids"]).issubset(event_ids):
+            counts["stale_source_skipped"] += 1
+            continue
+        if sample.get("input_hash") != digest(sample["messages"][:-1]):
+            counts["stale_input_skipped"] += 1
+            continue
         # verified 必须携带当前产物一致的可信证据，不能由可编辑状态字段单独授权。
         if sample["artifact_hash"] != digest(artifact(sample["messages"][-1])):
             counts["stale_artifact_skipped"] += 1
             continue
-        if sample[
-            "status"] == "verified" and not verified_evidence(
-            evidence_events, sample[
-            "artifact_hash"],
-            sample.get(
-            "call_id")):
+        if sample["status"] == "verified" and not sample_evidence(sample, evidence_events):
             counts["unbacked_verified_skipped"] += 1
             continue
         split_value = int(hashlib.sha256(sample["lineage"].encode()).hexdigest()[:16], 16) / 2**64
@@ -848,6 +1031,21 @@ def export(workdir, outdir, statuses=("verified",), validation_fraction=0.1):
         "artifact_hash": s[
         "artifact_hash"]}
         for s in samples])
+    for split in ("train", "validation"):
+        # 合并训练入口只消除同一真实调用的重复视图，不按正文删除不同调用。
+        rows = products[f"recovery.{split}.messages.jsonl"] + products[f"success.{split}.messages.jsonl"]
+        seen, merged = set(), []
+        for row in rows:
+            key = (row["project"], row["call_id"], row["artifact_hash"], digest(row["messages"]))
+            if key not in seen:
+                merged.append(row)
+                seen.add(key)
+        write_rows(outdir / f"{split}.messages.jsonl", merged)
+        write_rows(outdir / f"{split}.completion.jsonl", [
+            {**{k: v for k, v in row.items() if k not in {"messages", "assistant_loss_mask"}},
+             "prompt": row["messages"][:-1], "completion": row["messages"][-1]} for row in merged
+        ])
+        counts[f"dataset_{split}"] = len(merged)
     write_rows(outdir / "media-index.jsonl", [{"sha256": h, "media_ref": p} for h, p in assets.items()])
     write_rows(outdir / "statistics.jsonl", [dict(counts)])
     return dict(counts)
