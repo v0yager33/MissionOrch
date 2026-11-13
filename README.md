@@ -100,6 +100,39 @@ python scripts/index_knowledge_base.py --source doctrines --force
 - `docs/RAG_GUIDE.md` —— 朴素 RAG 详解 + Multi-Query + 当前可召回内容清单
 - `docs/ARCHITECTURE.md` —— 6-Agent 状态图 + 数据流
 
+## 与 ScenClaw WebUI 联动
+
+保留原 Streamlit／CLI 入口；独立 HTTP 服务复用 `run_graph` 的模型、RAG、profile 和评分配置，不跨仓库 import，也不改变默认规划算法。
+
+在本仓库已有 Python 环境中启动（令牌由部署环境提供，不写入命令行或 URL）：
+
+```bash
+export MISSIONORCH_PLANNING_TOKEN="${PLANNING_SERVICE_TOKEN}"
+PYTHONPATH=src python -m missionorch_lc.planning_server \
+  --host 127.0.0.1 --port 8502 --data-dir data \
+  --concurrency 1 --queue-limit 4 --job-timeout 1800
+```
+
+缺少令牌时拒绝启动。`data/planning-jobs/` 原子保存作业；重启后未完成作业标记 `interrupted`，不会自动重跑收费请求。并发数、等待队列和单作业超时可显式配置。跨机器部署应使用 HTTPS／受控反向代理；不要将明文 Bearer 服务直接暴露到公网。
+
+接口：
+- `GET /health`：无正文健康检查，不代表鉴权成功。
+- `POST /v1/plans`：Bearer 鉴权，JSON `{ "request_id": "<UUID>", "mission": "<任务描述>" }`；同 ID 同内容返回原作业。
+- `GET /v1/plans/<job_id>`、`POST /v1/plans/<job_id>/cancel`：查询／取消；取消正文为 `{}`。
+- `POST /v1/coa/prepare`：JSON `{ "markdown": "<完整 Markdown>", "selected_task_ids": null }`；`null` 为整份，数组为选中行动。只解析与检查，不调用模型。
+
+在 ScenClaw 根配置中启用 `planning`，并通过既有 `tools.ssrfWhitelist` 显式授权服务地址，详见 [ScenClaw README](../ScenClaw/README.md#任务规划与想定联动)。浏览器只连接 nanobot 的已鉴权 WebSocket；服务令牌不进入前端。
+
+WebUI 支持自然语言生成、完整 Markdown 编辑、不可变版本、整份／部分选择及原聊天续修。附加实体／地理章节保留；部分选择仅提示选中文本／触发条件中的显式未选阶段或行动 ID，不自动补全前置行动。来源生成评分不等于编辑版评分，结构报告也不表示想定已通过仿真。
+
+排查：`401` 检查两端令牌；`429 queue_full` 等待或显式调整容量；`timed_out` 检查原模型调用和服务超时；`interrupted` 检查已有作业／会话，显式发起新生成，不自动重放；`unparseable_plan`／`invalid_references` 修正矩阵、重复 ID、实体与地理引用。已保存规划在远端不可达时仍可由 ScenClaw 查看。
+
+离线回归（fake runner 与临时 HTTP 服务，不调用模型或仿真）：
+
+```bash
+PYTHONPATH=src python -m pytest tests/test_planning.py -q
+```
+
 ## 工具扩展
 
 后续新增工具时，继承 `langchain_core.tools.BaseTool`（或 `@tool` 装饰器）即可，
